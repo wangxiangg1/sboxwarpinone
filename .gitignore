@@ -1,0 +1,9 @@
+# 忽略本地临时测试、未加密私钥与散落密文产物
+.tmp/
+.secrets/
+*.age
+origin.crt
+origin.key
+payload.txt
+*.bak
+*.tmp.*
