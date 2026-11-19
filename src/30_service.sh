@@ -171,10 +171,17 @@ restart_and_check() {
 }
 
 fetch_latest_singbox_ver() {
-    _eff=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --max-time 10 "${GH_PROXY}https://github.com/SagerNet/sing-box/releases/latest" 2>/dev/null || true)
+    if [ -n "${SINGBOX_VER:-}" ]; then
+        printf '%s\n' "${SINGBOX_VER#v}"
+        return 0
+    fi
+    _eff=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --max-time 8 "${GH_PROXY}https://github.com/SagerNet/sing-box/releases/latest" 2>/dev/null || true)
     _ver=$(printf '%s' "$_eff" | sed -n 's|.*/tag/v\?\([^/?#]*\).*|\1|p')
     if [ -z "$_ver" ]; then
-        _ver=$(curl -fsSL --max-time 10 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\?\([^"]*\)".*/\1/p' | head -n1)
+        _ver=$(curl -fsSL --max-time 8 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\?\([^"]*\)".*/\1/p' | head -n1)
+    fi
+    if [ -z "$_ver" ]; then
+        _ver=$(curl -fsSL --max-time 10 "https://formulae.brew.sh/api/formula/sing-box.json" 2>/dev/null | sed -n 's/.*"stable"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
     fi
     printf '%s\n' "$_ver"
 }
@@ -186,7 +193,7 @@ download_core() {
         *) err "❌ 不支持的系统架构: $(uname -m)"; return 1 ;;
     esac
     _ver=$(fetch_latest_singbox_ver)
-    [ -n "$_ver" ] || { err "❌ 无法获取 sing-box 最新版本号（可设置 GH_PROXY 重试）"; return 1; }
+    [ -n "$_ver" ] || { err "❌ 无法获取 sing-box 最新版本号（可设置 GH_PROXY 或 SINGBOX_VER 重试）"; return 1; }
 
     if [ -x "$CORE_BIN" ] && [ "$(core_version)" = "$_ver" ]; then
         info "✅ 当前已安装最新版 sing-box v${_ver}，无需重复下载。"
@@ -202,12 +209,23 @@ download_core() {
     rm -rf "$TMPD"
     mkdir -p "$TMPD"
     PKG="sing-box-${_ver}-linux-${SARCH}${_libc}"
-    URL="${GH_PROXY}https://github.com/SagerNet/sing-box/releases/download/v${_ver}/${PKG}.tar.gz"
+    _rel_path="SagerNet/sing-box/releases/download/v${_ver}/${PKG}.tar.gz"
+    URL="${GH_PROXY}https://github.com/${_rel_path}"
     info "⬇️  下载: $URL"
-    if ! curl -fL --retry 2 -o "$TMPD/sbox.tar.gz" "$URL"; then
-        err "❌ 下载失败（可设置 GH_PROXY 环境变量使用加速前缀后重试）"
-        rm -rf "$TMPD"
-        return 1
+    if ! curl -fL --connect-timeout 8 --retry 1 -o "$TMPD/sbox.tar.gz" "$URL"; then
+        if [ -z "${GH_PROXY:-}" ]; then
+            URL="https://gh-v6.com/${_rel_path}"
+            warn "⚠️ 直连 GitHub 下载失败，尝试 IPv6 加速源: $URL"
+            if ! curl -fL --connect-timeout 10 --retry 2 -o "$TMPD/sbox.tar.gz" "$URL"; then
+                err "❌ 下载失败（可设置 GH_PROXY 环境变量使用加速前缀后重试）"
+                rm -rf "$TMPD"
+                return 1
+            fi
+        else
+            err "❌ 下载失败（可检查或更换 GH_PROXY 环境变量后重试）"
+            rm -rf "$TMPD"
+            return 1
+        fi
     fi
     if ! tar -xzf "$TMPD/sbox.tar.gz" -C "$TMPD"; then
         err "❌ 解压失败"
