@@ -242,10 +242,19 @@ _detect_one_stack() {
 }
 
 detect_ip() {
-    _r4=$(_detect_one_stack 4)
+    _ip_tmp4="/tmp/.ip_det4.$$"
+    _ip_tmp6="/tmp/.ip_det6.$$"
+    (_detect_one_stack 4 > "$_ip_tmp4") &
+    _pid4=$!
+    (_detect_one_stack 6 > "$_ip_tmp6") &
+    _pid6=$!
+    wait "$_pid4" 2>/dev/null || true
+    wait "$_pid6" 2>/dev/null || true
+    _r4=$(cat "$_ip_tmp4" 2>/dev/null || true)
+    _r6=$(cat "$_ip_tmp6" 2>/dev/null || true)
+    rm -f "$_ip_tmp4" "$_ip_tmp6"
     IPV4="${_r4%%|*}"
     WARP_IPV4="${_r4#*|}"
-    _r6=$(_detect_one_stack 6)
     IPV6="${_r6%%|*}"
     WARP_IPV6="${_r6#*|}"
 }
@@ -2401,40 +2410,40 @@ __EMBEDDED_WARP_FIX_EOF__
 write_embedded_origin_age() {
     cat <<'__EMBEDDED_ORIGIN_AGE_EOF__' > "$1"
 -----BEGIN AGE ENCRYPTED FILE-----
-YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBZQmZaOUhqWng1TlBhMWNO
-VTJ3RlV3IDE4Ck1qbnJjWG54ejJVOXU2T0laRkJSb0xQRzFiTjB2dGYwRjk4dHgy
-bE9vZ1kKLS0tIGNMakFlT2dGcDVXODVkUk9waHhzYjErZVJXZkp4N1N6WkZQYUNI
-N2c0RGMKqKcWsWEqcl2fKR10u1ccFHTbHj1vpMilSNWqPv7FFgWDlhBCTSbMozul
-jrI0m8GkTtJdgsKZMxhfH49jKoP7rnyuKiJbvy1cp5bG9lrmwWrxTnBShLQWBEfp
-VaTzEP+GKghIBO4OM8Zyo09JavhdgSDfPC4Fkrcnf97htT1ccEzQ+9uUBuR2wqfs
-4nReHoNIHwRdcKI6cDK7eFAWZ23nlzfgCjNjrN6BAgHfllvfRcMwa0zvuqxgCqkg
-L9iCVPIhxYye3rLsdH2MPzhSioZDJMaSZyT+g5+Iy/qUPqTqjvLfj3CsxGM/Ocqc
-yyE2SEOLm4nG3gaH5L8elPnp2MBDYV7z37mC5kX+SJjEmj+z/NZxosOzngGwv27u
-g/hUCsgpbuL8sQQdupe6fdG5u2k1yVhK4buw4PUKsTEiYa48qWdfeySS72m9THrx
-DQLpWQtpe/IYu3QS48deoaeeK07uIm+zT1gjEOwzb1SYvYW0W5Km19ENAVEidoAM
-zhsmmRk6pYa2q6P1iRXO6kNtgSswgIYSXt1NPbNiedRoxGnQjiJHEWh6+VkFiTnh
-jpE7J296VWfrFQPAzgoDY6qD51+kbXKoAvrS4c5GvkD4Fhw5pHjHNi3k2yHuKxyc
-unTf2seX+6jEYeDFOMC3TBUEqskPxe2F5XOUQyoXbh5LKgjLKOoBd3p2NxeR/Opd
-IfAd8XMtm1s6Yke+DZiuaTL18AIZ46m4sxJPmk7th4ICljrH3s72ThWmSCz2nAnu
-jaF5NE38m7NAZHrEOg4jGfDOIWkDrnhvqn5i9kwuK52RuR0sAorZ3mI0j2jdd70O
-0dVI++jwcZdEH6vy65nt+CJr5fIkJxyCj7Mwa53FWXw9ZJY3KODkjU/OkW7uk54/
-+PbOuatTLGPgNtW1bVBu0T2RIRm6NG0BKObUu3Lr+dooHeLZsBMH9DDkkZcTUB1d
-XQuyKaVc5Ri9RFs2ILJ2LmidpCtEIX2ePSJTR8ViNTleamQ0UaiuvmymEFQHTl3W
-1zEqGImNSxiaaAERg+zJ9Hrc+VFBb4VcfqqWjemGaAA+An08ZBInqhYYbOhIf6it
-N2WdXAUp56eBXKbZ0cg51R0HpSUweI/Mw/9WHOFaODeIpdN1UAineDHdtMGQZ7so
-OTiKtAVIaJw0BRTeBG7tHcDcvVC6uQxggv616nfZ0t2LlUyS8rLkrqpqRdt/Yh2a
-7PrF64eEDOeWYbUrBMh88aJYNa6blrhPGgIGnblIMvBqooUepVnKLPQ8wARhPfDp
-8CnHHTkAPWBx07zryhmMkZUbDCcTa6FaromcLnp6WTN+zKnoYvw33aBWQ+uNgAG4
-Z+yVuNvd8mJhlE4BYAZXzHSLFPByYj0dWNAx+eCFBRGk0AUkfg7YmtiSST0EectK
-nlFaeRweJvoSSovR/uJ2fz2jwMadhWrNNS4wqgpslWRdjF8wvQJ33hhZkOZOsGyH
-VaD0a/5BMy7NhemUvNvFF2tf+hDzvtjFvcR2MdxikccVW3QmN2402spqXLOcgPF/
-CR+zR/VYs4m/WKNoBOh4/KNvFoPXxbz2Qs31LDCDCK+DGECTcrd017YsLm9Xga++
-HKxDmzErat5XqmZzmAP7I7CDB3zi4Pxz/AhqrY8SWglb1UaedtDoJCxpLEB1djkk
-zwJjPzCSCVo+F7/U3ztaUKNEz0D4gxxNGBYSuRlUxygBlxzKDqahFsApypOj5nMo
-RaHZeHwFdd4wMNq5k/IFUmaAuXGMsg1F9XW5eTtZ0Ik8aFxfNteNn7tXdcH35S30
-8iUzhePhjutIElyz74uYFEJ9F4gubZ6Vw7YiqrFCiMmzZNkLJmZKiPoDeU3LQ/JK
-cOgFVUAyCsxZ6w/wt8whUVjqOmBGQidg+1M8inPkD6Ve5D4YGf7VcPt30P2aKTTj
-yisKGNaABx+6m4xaG1oBsPwhzMfa
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBrT0JkU3o3bzNPWU5qWGRO
+OTJESlNBIDE4CkpaNnZ6SGxyL3BzaGV1VXo0TVJpQ01mTERERjdUa1lMaWNqeDE5
+SFIrNlUKLS0tIDBWWlRsNUp0VkY2S0U1anAwOUxXOVcraURkdnZxMEJVc0xBMXF1
+NTFQQk0K91peIDeW37aDixI604/9u3bXAPebZqgvS9/xX16F8v61YZtlDnU8Qww8
+qWakwQ+vzcgSkCE77VwIimwHW58Bld5kBJcnhd/yVN/DaP7N8MA1TxRbgP6Z+mK+
+bXY19PoCVb4wGJdhb6Rcrk9Wj0N3cagBFfbNYNUuESojMrTHJpxvTR5EscMaAKzm
+hQzE3v6AL3s6usI4Yd0bzWn1Q5mayt5KdKznOWlz7VDEj6PGTPWcZgv5XFhv/C1M
+rRplrYvtH/nxFHFImEYFbpmXGWbKW37vwxDOJh+L5mpDcNlR/rxG4Oqh17gR0Z15
+QxQ2Tt4ERj4cBFLf+45B0SsncOtUGLO3FGSDbhA06lOsoqjvkPuffAtLlcD//8il
+7YVB132i7ZV8ECBrnymc05pP1by70v7v2Z0umStIhP+BnWoqvIXWwrDsqlGKH4G7
+ara2pzt59SNEOpnT8duCvTdu0ywHXnjZIcVphUaE6V9QifzFZ5tGQm0y69LKjMyX
+WAgvTY32IM+3+7ZUvO700n6CqOgmN6QedGV5ei1c4oRZ2WwZ5iu7kYVTEDS5Puhl
+LPveQPhMP1UGzyWA9BpG0ep1gJifM8RNkExeHr1mPImplfiBM3kGvZK++gvZN3N+
+ubAZhiyG3ChygiELo2yaplw9Um9IvGLH/rNLRMsLk15+f9QLRupRvCoTfF9I1cYw
+BoUpc8WO9Aw5iPyRySfoJF53dyonA9BG/mJ0/g9i3UCKBq2BncDrdGNv73Bvm0v+
+hAIkVeRAJgmwaMCjJNec4npzAnTOpA641cjNziNDwyn8MZ8F28QpVYah0N6RENhi
+dTGoJu40WRH3ObeWOEKU2YzvDoZMlcVwTJzdOfm8lEd5mVM3vbsqXCwwc1/3ZSRm
+2PnzyYH5jC9LSWfFMHyfPFzKshE4EV+In7RK8vRKKKEfQe+GbQE61bDxfuL+lJsg
+Xa95WlcNNw//YyYz66xcR3qym8ugzkAVVL+nJo1X7niZgRF8DoD9DmEaBn8L+pwS
++G//Ky3F1K1pdlynMravM4JUaDEYIz8Bo7MjyjkGjFB9A5HL+RWSRyO9oeRvnkr2
+BrGcOhUTXudzeI/lIOM26P01h/jMKtqRUsmByK5xgTyuFzBnxCP0rGQlaD7qhLGt
+u7Ytoc0szAFH286ZH4jH+O2vL63wRlpHh9eDz51ZetIPsA8v5gPjUbOHGr7uzrs3
+smfcs/eV9uj1Z4HErLUCIoVxAL+zATFcEyWyYlMSIPo/ZND0fgQgu0y6pbAB7FjV
+9Y+/B6Ub2olM87rbiqs2W3SWoZ2Dc1O1opN7HTJyAkbA7Bu7YLszR2DE2gNZvtZO
+Gphp498+zr1c8efFVA7ymUXvpSHYsvJ01irO5fBTC/7QAC6YdzOURVImQcm7I4w9
+Y7jmjfE6HcLHyqjZxpKflBXSB3rsQVkt6ZtjtKwdn+j+C0SGHFtyywwxzeE4aQWe
+VIFKA1bi80V2XidvC+PbKVSfdreZ6MCHxdFtpdoAjQr6wM9xC57BKiKKQKKYt20O
+fvoHoLa5+LD8y8eWWbDAihwA9/toVZ/0i3S5IlVxq8GIuV2CEGybamDUfQ1SB5Dx
+yjWPfVD07ir5W8XMLuSFX2GT7M0fWpKSkKc3stOBwZ3u6PRPfx0893vNZeXtI5pz
+6EHmu99APtRWl8/+8b9D8mgs60e6keKg3+PexVdYwNmukoE5qM8omWLk5Y4sN42Y
+fx4UsV2c8hfCXvV64EZw0RN8GYv8XADIplHn9/5T2FV6ermPpkjjmJHsGpwyuU6n
+j5h8G+u06J83X+6UryVBaS8xE+TT9XYGOmhl+YYSYaL98SdtMy3wYZ/DaEHT9uHD
+Z7KRDlUB96f0AyLmk58Hr1WPNcE94daiJQcIPyjgtVOsNCpB+UtXmwoLL3qb7uGi
+rn43KZ9Utm4/mRKeaQFC+tcwwvNx
 -----END AGE ENCRYPTED FILE-----
 __EMBEDDED_ORIGIN_AGE_EOF__
 }
@@ -2509,7 +2518,29 @@ uninstall_all() {
     return 0
 }
 
+update_self() {
+    _url="${GH_PROXY:-}https://raw.githubusercontent.com/wangxiangg1/sboxwarpinone/main/sbox.sh"
+    _tmp="/tmp/sbox.sh.new.$$"
+    info "⬇️  正在拉取最新管理脚本: $_url"
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 "$_url" -o "$_tmp"; then
+        err "❌ 拉取最新脚本失败"
+        rm -f "$_tmp"
+        return 1
+    fi
+    if ! head -n1 "$_tmp" | grep -q '^#!/bin/sh' || ! grep -q 'SCRIPT_VERSION=' "$_tmp" || ! sh -n "$_tmp" >/dev/null 2>&1; then
+        err "❌ 下载的脚本校验失败，已放弃覆盖"
+        rm -f "$_tmp"
+        return 1
+    fi
+    _new_ver=$(sed -n 's/^SCRIPT_VERSION="\([^"]*\)".*/\1/p' "$_tmp" | head -n1)
+    cp -f "$_tmp" /root/sbox.sh && cp -f "$_tmp" /usr/local/bin/sbox && chmod +x /root/sbox.sh /usr/local/bin/sbox
+    rm -f "$_tmp"
+    info "✅ 管理脚本已更新至 v${_new_ver:-latest}，即将重新加载..."
+    exec /usr/local/bin/sbox
+}
+
 show_header() {
+    [ -n "$JSON_ENGINE" ] || detect_json_engine >/dev/null 2>&1 || true
     load_strategy
     PID=$(core_pid || true)
     if [ -n "$PID" ]; then
@@ -2551,9 +2582,10 @@ main_menu() {
         echo "11. Cloudflare 测速 (100MB 下载 + 50MB 上传)"
         echo "12. 重新探测本机 IP"
         echo "13. 卸载 sing-box"
+        echo "14. 更新管理脚本 (sbox.sh)"
         echo " 0. 退出"
         line
-        ask "请输入数字 [0-13]: "
+        ask "请输入数字 [0-14]: "
         case "$REPLY" in
             1) show_links_menu; pause ;;
             2) menu_add_node ;;
@@ -2568,6 +2600,7 @@ main_menu() {
             11) cf_speedtest; pause ;;
             12) detect_ip ;;
             13) uninstall_all && exit 0; pause ;;
+            14) update_self; pause ;;
             0|q|Q) exit 0 ;;
             *) warn "无效输入" ;;
         esac
