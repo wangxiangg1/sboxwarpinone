@@ -67,7 +67,29 @@ uninstall_all() {
     return 0
 }
 
+update_self() {
+    _url="${GH_PROXY:-}https://raw.githubusercontent.com/wangxiangg1/sboxwarpinone/main/sbox.sh"
+    _tmp="/tmp/sbox.sh.new.$$"
+    info "⬇️  正在拉取最新管理脚本: $_url"
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 "$_url" -o "$_tmp"; then
+        err "❌ 拉取最新脚本失败"
+        rm -f "$_tmp"
+        return 1
+    fi
+    if ! head -n1 "$_tmp" | grep -q '^#!/bin/sh' || ! grep -q 'SCRIPT_VERSION=' "$_tmp" || ! sh -n "$_tmp" >/dev/null 2>&1; then
+        err "❌ 下载的脚本校验失败，已放弃覆盖"
+        rm -f "$_tmp"
+        return 1
+    fi
+    _new_ver=$(sed -n 's/^SCRIPT_VERSION="\([^"]*\)".*/\1/p' "$_tmp" | head -n1)
+    cp -f "$_tmp" /root/sbox.sh && cp -f "$_tmp" /usr/local/bin/sbox && chmod +x /root/sbox.sh /usr/local/bin/sbox
+    rm -f "$_tmp"
+    info "✅ 管理脚本已更新至 v${_new_ver:-latest}，即将重新加载..."
+    exec /usr/local/bin/sbox
+}
+
 show_header() {
+    [ -n "$JSON_ENGINE" ] || detect_json_engine >/dev/null 2>&1 || true
     load_strategy
     PID=$(core_pid || true)
     if [ -n "$PID" ]; then
@@ -109,9 +131,10 @@ main_menu() {
         echo "11. Cloudflare 测速 (100MB 下载 + 50MB 上传)"
         echo "12. 重新探测本机 IP"
         echo "13. 卸载 sing-box"
+        echo "14. 更新管理脚本 (sbox.sh)"
         echo " 0. 退出"
         line
-        ask "请输入数字 [0-13]: "
+        ask "请输入数字 [0-14]: "
         case "$REPLY" in
             1) show_links_menu; pause ;;
             2) menu_add_node ;;
@@ -126,6 +149,7 @@ main_menu() {
             11) cf_speedtest; pause ;;
             12) detect_ip ;;
             13) uninstall_all && exit 0; pause ;;
+            14) update_self; pause ;;
             0|q|Q) exit 0 ;;
             *) warn "无效输入" ;;
         esac

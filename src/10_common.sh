@@ -174,10 +174,19 @@ _detect_one_stack() {
 }
 
 detect_ip() {
-    _r4=$(_detect_one_stack 4)
+    _ip_tmp4="/tmp/.ip_det4.$$"
+    _ip_tmp6="/tmp/.ip_det6.$$"
+    (_detect_one_stack 4 > "$_ip_tmp4") &
+    _pid4=$!
+    (_detect_one_stack 6 > "$_ip_tmp6") &
+    _pid6=$!
+    wait "$_pid4" 2>/dev/null || true
+    wait "$_pid6" 2>/dev/null || true
+    _r4=$(cat "$_ip_tmp4" 2>/dev/null || true)
+    _r6=$(cat "$_ip_tmp6" 2>/dev/null || true)
+    rm -f "$_ip_tmp4" "$_ip_tmp6"
     IPV4="${_r4%%|*}"
     WARP_IPV4="${_r4#*|}"
-    _r6=$(_detect_one_stack 6)
     IPV6="${_r6%%|*}"
     WARP_IPV6="${_r6#*|}"
 }
