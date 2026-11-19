@@ -1229,10 +1229,17 @@ restart_and_check() {
 }
 
 fetch_latest_singbox_ver() {
-    _eff=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --max-time 10 "${GH_PROXY}https://github.com/SagerNet/sing-box/releases/latest" 2>/dev/null || true)
+    if [ -n "${SINGBOX_VER:-}" ]; then
+        printf '%s\n' "${SINGBOX_VER#v}"
+        return 0
+    fi
+    _eff=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --max-time 8 "${GH_PROXY}https://github.com/SagerNet/sing-box/releases/latest" 2>/dev/null || true)
     _ver=$(printf '%s' "$_eff" | sed -n 's|.*/tag/v\?\([^/?#]*\).*|\1|p')
     if [ -z "$_ver" ]; then
-        _ver=$(curl -fsSL --max-time 10 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\?\([^"]*\)".*/\1/p' | head -n1)
+        _ver=$(curl -fsSL --max-time 8 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\?\([^"]*\)".*/\1/p' | head -n1)
+    fi
+    if [ -z "$_ver" ]; then
+        _ver=$(curl -fsSL --max-time 10 "https://formulae.brew.sh/api/formula/sing-box.json" 2>/dev/null | sed -n 's/.*"stable"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
     fi
     printf '%s\n' "$_ver"
 }
@@ -1244,7 +1251,7 @@ download_core() {
         *) err "❌ 不支持的系统架构: $(uname -m)"; return 1 ;;
     esac
     _ver=$(fetch_latest_singbox_ver)
-    [ -n "$_ver" ] || { err "❌ 无法获取 sing-box 最新版本号（可设置 GH_PROXY 重试）"; return 1; }
+    [ -n "$_ver" ] || { err "❌ 无法获取 sing-box 最新版本号（可设置 GH_PROXY 或 SINGBOX_VER 重试）"; return 1; }
 
     if [ -x "$CORE_BIN" ] && [ "$(core_version)" = "$_ver" ]; then
         info "✅ 当前已安装最新版 sing-box v${_ver}，无需重复下载。"
@@ -1260,12 +1267,23 @@ download_core() {
     rm -rf "$TMPD"
     mkdir -p "$TMPD"
     PKG="sing-box-${_ver}-linux-${SARCH}${_libc}"
-    URL="${GH_PROXY}https://github.com/SagerNet/sing-box/releases/download/v${_ver}/${PKG}.tar.gz"
+    _rel_path="SagerNet/sing-box/releases/download/v${_ver}/${PKG}.tar.gz"
+    URL="${GH_PROXY}https://github.com/${_rel_path}"
     info "⬇️  下载: $URL"
-    if ! curl -fL --retry 2 -o "$TMPD/sbox.tar.gz" "$URL"; then
-        err "❌ 下载失败（可设置 GH_PROXY 环境变量使用加速前缀后重试）"
-        rm -rf "$TMPD"
-        return 1
+    if ! curl -fL --connect-timeout 8 --retry 1 -o "$TMPD/sbox.tar.gz" "$URL"; then
+        if [ -z "${GH_PROXY:-}" ]; then
+            URL="https://gh-v6.com/${_rel_path}"
+            warn "⚠️ 直连 GitHub 下载失败，尝试 IPv6 加速源: $URL"
+            if ! curl -fL --connect-timeout 10 --retry 2 -o "$TMPD/sbox.tar.gz" "$URL"; then
+                err "❌ 下载失败（可设置 GH_PROXY 环境变量使用加速前缀后重试）"
+                rm -rf "$TMPD"
+                return 1
+            fi
+        else
+            err "❌ 下载失败（可检查或更换 GH_PROXY 环境变量后重试）"
+            rm -rf "$TMPD"
+            return 1
+        fi
     fi
     if ! tar -xzf "$TMPD/sbox.tar.gz" -C "$TMPD"; then
         err "❌ 解压失败"
@@ -2383,40 +2401,40 @@ __EMBEDDED_WARP_FIX_EOF__
 write_embedded_origin_age() {
     cat <<'__EMBEDDED_ORIGIN_AGE_EOF__' > "$1"
 -----BEGIN AGE ENCRYPTED FILE-----
-YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBXWThqMGtqZm53SDB3TGtS
-Q21ib1N3IDE4CkZkL2dMdjQ1OWxBdE1vRG9OYUxjciszWTNRODJUZXR4T3orVU0r
-d2tqQkkKLS0tIDNXd1c5MWppem9vUnhUY1EyQ2cvZ2hSMHF6LzlPUE9TZ0tyVzFS
-TkdYd2sKjXLUcUiXkGaVRQ1MnAVlRSs6ebzCPmNHpb+9YZiJ5SptKAtWHl0pWUc+
-Ipyrex7xpraNznPjQxr/wsKUOQu5wj8iL3ScDQVuZs/4itWaetUY4x1XlCDk05K+
-a0muNANXoBH7nyRiPDqIcupB5G+0Wpy85Mp2GRLRsnlVAM+l0Bdj9PrHwoAJrIGR
-aPeN6UZTQMHp9+M7Au+nIQbpbbNm5jYN1lhKI3/8LQ6RRKPuNntR4RTQqBgR2PXj
-jv973nbPs+54yoG8ulf9eFG78HIwmgj1eM9vXfBr7164bq0ZCRaxluHG3v7mEJpO
-0SsNjLEuAQAJfS2+S/V2uWT68Ok86VYgzeCTWUMveKL4NpAh1YGypnmlLGvrb48E
-zGjqUlUrsaSlWLyH8Z19dHpNo4AfU5MZqHFevyvk85iKAHMes6BDNhWitZ92Wlls
-e7/0iVsKcnFdEPfm6yayezw9sC7FOeZPtJ8b3vnXRGmBuZxrmki8gQe/rODr7Z+Y
-geJzbMDE0s1f8Qe3wH8VE/sgJOeYapJAoE3xitAzXLh6/2kXCe2UKvqFezwiOMvW
-8jE7Nk+MI4xjF8K8ieCbUYtH81uIaz3UQ8cDCfrT07IoC9KfBZfuVCjTB6ADFtrL
-/dEMyvfg0O9UnnYq7aFcNpGLFKU0PuKJWY61ht04+rgYYklhqm0a1deaubnL3vYL
-KND7Imm/T8lOvbEXE/LoOMKHSxGX3TeeHI3+AZknK3N3CrjQq0TnBhQixUEDAswx
-wjxFAIgvfOOTCcVQSvKYROzNoghvxahWZ3glZp7YPYzHW/GyusKSHnfYlBHZU/Jz
-MEdjdCLwdoiHO1DKG1kvC9zgB8Y17SsStNEDKM0tYmGEAA5/eukQJhXesNMBdedE
-79ZjhmQqpEvS3O061STLiqZYV/hVFaQWCIZIDSYHUEmnWm9hLdDL+tvAOL/wUpDq
-8WQqfskM/XU1+Ya2GPhaW/8R41G+NlNQz6lE1CGnPVEkEyFnTNE35KQrrL+gVP9V
-Mu9GJMKiPWgThdGeAAsGgd6p9HcyCdHcAYsr4VJ/EEc23bFPl8MAep2c/QEHUq+S
-loMSuHkAxkoZeWU1CBVTtCBTIwwyBXtwvAtLj/uCYTi7p91MCIaJQ+xJX4RVGiMG
-+WMDi19Pt72cwkL1d9gWoCsGLfWQtKS2BIukHY6Y7f+++oanuzOSwAg8D0vmtbcd
-eVzBwvRMBYsdwunp12IBBF+rkDEl235TNZVdMYevMvWqSQRpo/23d8unpLAeH/z6
-u+LLOsXYLaiYcanKhB42MssgC7YGktAlJjIQyRxE6IG3pxuTVl5AiqzNNKmPCYiR
-KDTbNi122fu2wa8DGRRCU38qbG9MK3EtVuysmFdp5p6xPeSlFoa+IUVCltU9vQoR
-Cll8Ltciex57OTD3D1A1jo4K71E+E0oRdr1khOL79AruZ2PtZgeIeF3qhqfWzAic
-J5Ib60pp8OswPSrQdlA+BFtzoWYaFwea9VXPR+MV5lvRlJVm1znAiQuroMvtwvmT
-TUgHkUx0ssbRxAsYpRm3CeHJYd917yvnDv/Oul9DLUYL5OygyOB5iu+ulyCwu1oX
-FzlVuBidMHROa2ebrvphKlrk/NkUE0fqHo5UkBxF7cbASwxNvfqhv+2woaxwKHcH
-hTsRj84s09lo3mPrdoRyeGYiIE3UB0biU21sDiZ4XlTvpRtaU7XgvLi/peuECxM2
-qVEnVgNBe63geBs1RS72GkMIteb/gacuz1XttNJ5lM48Lq9kWNAkHYDG9aPqRca3
-b3nJ1/nAdR5YiUmSsphdYr+dIIEmwvZ7sbmCnaD0+Ps2zlI+fKix0/yDIbn5WujV
-ty6tH87EWYCd+EkuUatMLLHiiHbF7a5TyS+i0Ep0jekCMfSWvYzNSx4ov9uM5VhO
-ME4+vGGJwpiNFgQrKkL++QbPQ8st
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBZQmZaOUhqWng1TlBhMWNO
+VTJ3RlV3IDE4Ck1qbnJjWG54ejJVOXU2T0laRkJSb0xQRzFiTjB2dGYwRjk4dHgy
+bE9vZ1kKLS0tIGNMakFlT2dGcDVXODVkUk9waHhzYjErZVJXZkp4N1N6WkZQYUNI
+N2c0RGMKqKcWsWEqcl2fKR10u1ccFHTbHj1vpMilSNWqPv7FFgWDlhBCTSbMozul
+jrI0m8GkTtJdgsKZMxhfH49jKoP7rnyuKiJbvy1cp5bG9lrmwWrxTnBShLQWBEfp
+VaTzEP+GKghIBO4OM8Zyo09JavhdgSDfPC4Fkrcnf97htT1ccEzQ+9uUBuR2wqfs
+4nReHoNIHwRdcKI6cDK7eFAWZ23nlzfgCjNjrN6BAgHfllvfRcMwa0zvuqxgCqkg
+L9iCVPIhxYye3rLsdH2MPzhSioZDJMaSZyT+g5+Iy/qUPqTqjvLfj3CsxGM/Ocqc
+yyE2SEOLm4nG3gaH5L8elPnp2MBDYV7z37mC5kX+SJjEmj+z/NZxosOzngGwv27u
+g/hUCsgpbuL8sQQdupe6fdG5u2k1yVhK4buw4PUKsTEiYa48qWdfeySS72m9THrx
+DQLpWQtpe/IYu3QS48deoaeeK07uIm+zT1gjEOwzb1SYvYW0W5Km19ENAVEidoAM
+zhsmmRk6pYa2q6P1iRXO6kNtgSswgIYSXt1NPbNiedRoxGnQjiJHEWh6+VkFiTnh
+jpE7J296VWfrFQPAzgoDY6qD51+kbXKoAvrS4c5GvkD4Fhw5pHjHNi3k2yHuKxyc
+unTf2seX+6jEYeDFOMC3TBUEqskPxe2F5XOUQyoXbh5LKgjLKOoBd3p2NxeR/Opd
+IfAd8XMtm1s6Yke+DZiuaTL18AIZ46m4sxJPmk7th4ICljrH3s72ThWmSCz2nAnu
+jaF5NE38m7NAZHrEOg4jGfDOIWkDrnhvqn5i9kwuK52RuR0sAorZ3mI0j2jdd70O
+0dVI++jwcZdEH6vy65nt+CJr5fIkJxyCj7Mwa53FWXw9ZJY3KODkjU/OkW7uk54/
++PbOuatTLGPgNtW1bVBu0T2RIRm6NG0BKObUu3Lr+dooHeLZsBMH9DDkkZcTUB1d
+XQuyKaVc5Ri9RFs2ILJ2LmidpCtEIX2ePSJTR8ViNTleamQ0UaiuvmymEFQHTl3W
+1zEqGImNSxiaaAERg+zJ9Hrc+VFBb4VcfqqWjemGaAA+An08ZBInqhYYbOhIf6it
+N2WdXAUp56eBXKbZ0cg51R0HpSUweI/Mw/9WHOFaODeIpdN1UAineDHdtMGQZ7so
+OTiKtAVIaJw0BRTeBG7tHcDcvVC6uQxggv616nfZ0t2LlUyS8rLkrqpqRdt/Yh2a
+7PrF64eEDOeWYbUrBMh88aJYNa6blrhPGgIGnblIMvBqooUepVnKLPQ8wARhPfDp
+8CnHHTkAPWBx07zryhmMkZUbDCcTa6FaromcLnp6WTN+zKnoYvw33aBWQ+uNgAG4
+Z+yVuNvd8mJhlE4BYAZXzHSLFPByYj0dWNAx+eCFBRGk0AUkfg7YmtiSST0EectK
+nlFaeRweJvoSSovR/uJ2fz2jwMadhWrNNS4wqgpslWRdjF8wvQJ33hhZkOZOsGyH
+VaD0a/5BMy7NhemUvNvFF2tf+hDzvtjFvcR2MdxikccVW3QmN2402spqXLOcgPF/
+CR+zR/VYs4m/WKNoBOh4/KNvFoPXxbz2Qs31LDCDCK+DGECTcrd017YsLm9Xga++
+HKxDmzErat5XqmZzmAP7I7CDB3zi4Pxz/AhqrY8SWglb1UaedtDoJCxpLEB1djkk
+zwJjPzCSCVo+F7/U3ztaUKNEz0D4gxxNGBYSuRlUxygBlxzKDqahFsApypOj5nMo
+RaHZeHwFdd4wMNq5k/IFUmaAuXGMsg1F9XW5eTtZ0Ik8aFxfNteNn7tXdcH35S30
+8iUzhePhjutIElyz74uYFEJ9F4gubZ6Vw7YiqrFCiMmzZNkLJmZKiPoDeU3LQ/JK
+cOgFVUAyCsxZ6w/wt8whUVjqOmBGQidg+1M8inPkD6Ve5D4YGf7VcPt30P2aKTTj
+yisKGNaABx+6m4xaG1oBsPwhzMfa
 -----END AGE ENCRYPTED FILE-----
 __EMBEDDED_ORIGIN_AGE_EOF__
 }
