@@ -101,6 +101,106 @@ ensure_age_bin() {
     return 1
 }
 
+_age_decrypt_with_passphrase() {
+    _out_file="$1"
+    _in_file="$2"
+    _pw="$3"
+
+    if command -v python3 >/dev/null 2>&1 && python3 -c 'import pty, select' >/dev/null 2>&1; then
+        _SBOX_AGE_PW="$_pw" python3 - "$_out_file" "$_in_file" <<'__SBOX_AGE_PY_EOF__'
+import os, pty, select, signal, sys, time
+
+out_f, in_f = sys.argv[1], sys.argv[2]
+pw = os.environ.get("_SBOX_AGE_PW", "")
+pid, master = pty.fork()
+if pid == 0:
+    os.execvp("age", ["age", "-d", "-o", out_f, in_f])
+
+buf = b""
+sent = 0
+timed_out = False
+deadline = time.monotonic() + 20.0
+while time.monotonic() < deadline:
+    r, _, _ = select.select([master], [], [], 0.5)
+    if not r:
+        continue
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    buf += chunk
+    if sent == 0 and b"passphrase" in buf.lower() and buf.rstrip().endswith(b":"):
+        os.write(master, (pw + "\n").encode("utf-8"))
+        buf = b""
+        sent = 1
+else:
+    timed_out = True
+
+try:
+    os.close(master)
+except OSError:
+    pass
+if timed_out:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+_, st = os.waitpid(pid, 0)
+if timed_out:
+    sys.exit(124)
+if hasattr(os, "waitstatus_to_exitcode"):
+    sys.exit(os.waitstatus_to_exitcode(st))
+sys.exit(0 if st == 0 else (((st >> 8) & 0xff) or 1))
+__SBOX_AGE_PY_EOF__
+        _rc=$?
+        unset _SBOX_AGE_PW 2>/dev/null || true
+        return $_rc
+    fi
+
+    if ! command -v expect >/dev/null 2>&1; then
+        info "📦 正在准备交互辅助工具 expect..."
+        install_pkg expect >/dev/null 2>&1 || true
+    fi
+    if command -v expect >/dev/null 2>&1; then
+        _SBOX_AGE_PW="$_pw" expect -f - "$_out_file" "$_in_file" <<'__SBOX_AGE_EXP_EOF__'
+log_user 0
+set timeout 20
+set pw $env(_SBOX_AGE_PW)
+set out [lindex $argv 0]
+set in  [lindex $argv 1]
+spawn -noecho age -d -o $out $in
+set sent 0
+expect {
+    -re {[Pp]assphrase.*:} {
+        if {$sent == 0} {
+            send -- "$pw\r"
+            set sent 1
+            exp_continue
+        }
+    }
+    eof
+    timeout {
+        catch { close -i $spawn_id }
+        exit 124
+    }
+}
+set res [wait]
+if {[llength $res] >= 4 && [lindex $res 2] == 0} {
+    exit [lindex $res 3]
+}
+exit 1
+__SBOX_AGE_EXP_EOF__
+        _rc=$?
+        unset _SBOX_AGE_PW 2>/dev/null || true
+        return $_rc
+    fi
+
+    warn "⚠️ 未检测到 python3 或 expect，回退为原生隐藏输入模式。"
+    age -d -o "$_out_file" "$_in_file"
+}
+
 decrypt_embedded_origin_cert() {
     if ! has_embedded_origin_age; then
         err "❌ 当前脚本副本尚未经 GitHub Actions 注入加密证书密文。"
@@ -122,8 +222,14 @@ decrypt_embedded_origin_cert() {
 
     _try=1
     while [ "$_try" -le 3 ]; do
-        info "🔑 请输入内置 Cloudflare Origin 证书解锁密码（第 ${_try}/3 次，输入时不显示字符）："
-        if age -d -o "$_plain_file" "$_age_file"; then
+        info "🔑 请输入内置 Cloudflare Origin 证书解锁密码（第 ${_try}/3 次，输入内容直接可见）："
+        ask "Enter passphrase: "
+        _age_pw=$(printf '%s' "$REPLY" | tr -d '\r')
+        REPLY=""
+        if [ -z "$_age_pw" ]; then
+            warn "⚠️ 密码不能为空。"
+        elif _age_decrypt_with_passphrase "$_plain_file" "$_age_file" "$_age_pw"; then
+            _age_pw=""
             _dom=$(awk -F= '/^DOMAIN=/{print $2; exit}' "$_plain_file" | tr -d ' \r\n')
             awk '/^---CERT---$/{f=1;next}/^---KEY---$/{f=0}f' "$_plain_file" > "$_crt_tmp"
             awk '/^---KEY---$/{f=1;next}f' "$_plain_file" > "$_key_tmp"
@@ -148,13 +254,16 @@ decrypt_embedded_origin_cert() {
             err "❌ 解密后的证书或私钥内容无效。"
             rm -f "$_age_file"
             return 1
+        else
+            _age_pw=""
+            rm -f "$_plain_file"
+            warn "⚠️ 解密失败（请检查所输入的密码、大小写及前后是否多出空格）。"
         fi
-        rm -f "$_plain_file"
-        warn "⚠️ 解密失败（密码错误或当前终端无法读取密码输入）。"
         [ "$_try" -lt 3 ] && { confirm "是否重新输入密码重试？" || break; }
         _try=$((_try + 1))
     done
 
+    _age_pw=""
     rm -f "$_age_file" "$_plain_file" "$_crt_tmp" "$_key_tmp"
     return 1
 }
