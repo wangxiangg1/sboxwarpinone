@@ -36,7 +36,7 @@ jobs:
           ORIGIN_KEY: ${{ secrets.ORIGIN_KEY }}
         run: |
           python3 - <<'PY'
-          import os, pty, select, subprocess, sys, time
+          import base64, hashlib, hmac, os, pty, select, struct, subprocess, sys, time
 
           passphrase = os.environ.get("AGE_PASSPHRASE", "").strip("\r\n")
           domain = os.environ.get("ORIGIN_DOMAIN", "").strip()
@@ -116,7 +116,89 @@ jobs:
               if rc != 0 or sent == 0:
                   raise SystemExit(f"❌ age 执行失败 (rc={rc}, prompts={sent})")
 
-          run_age_with_pty(["-p", "-a", "-o", age_path, payload_path], passphrase)
+          def b64_raw(data):
+              return base64.b64encode(data).decode("ascii").rstrip("=")
+
+          def rotl32(v, c):
+              return ((v << c) & 0xffffffff) | (v >> (32 - c))
+
+          def qr(x, a, b, c, d):
+              x[a] = (x[a] + x[b]) & 0xffffffff; x[d] = rotl32(x[d] ^ x[a], 16)
+              x[c] = (x[c] + x[d]) & 0xffffffff; x[b] = rotl32(x[b] ^ x[c], 12)
+              x[a] = (x[a] + x[b]) & 0xffffffff; x[d] = rotl32(x[d] ^ x[a], 8)
+              x[c] = (x[c] + x[d]) & 0xffffffff; x[b] = rotl32(x[b] ^ x[c], 7)
+
+          def chacha20_block(key, counter, nonce):
+              st = list(struct.unpack("<4I8I1I3I", b"expand 32-byte k" + key + struct.pack("<I", counter) + nonce))
+              w = st[:]
+              for _ in range(10):
+                  qr(w, 0, 4, 8, 12); qr(w, 1, 5, 9, 13); qr(w, 2, 6, 10, 14); qr(w, 3, 7, 11, 15)
+                  qr(w, 0, 5, 10, 15); qr(w, 1, 6, 11, 12); qr(w, 2, 7, 8, 13); qr(w, 3, 4, 9, 14)
+              return struct.pack("<16I", *((w[i] + st[i]) & 0xffffffff for i in range(16)))
+
+          def chacha20_xor(key, counter, nonce, data):
+              out = bytearray()
+              for i in range(0, len(data), 64):
+                  ks = chacha20_block(key, counter + (i // 64), nonce)
+                  chunk = data[i:i + 64]
+                  out.extend(b ^ k for b, k in zip(chunk, ks))
+              return bytes(out)
+
+          def poly1305_mac(msg, key):
+              r = int.from_bytes(key[:16], "little") & 0x0ffffffc0ffffffc0ffffffc0fffffff
+              s = int.from_bytes(key[16:32], "little")
+              p = (1 << 130) - 5
+              acc = 0
+              for i in range(0, len(msg), 16):
+                  blk = msg[i:i + 16]
+                  n = int.from_bytes(blk + b"\x01", "little")
+                  acc = ((acc + n) * r) % p
+              return ((acc + s) & ((1 << 128) - 1)).to_bytes(16, "little")
+
+          def aead_encrypt(key, nonce, plaintext):
+              otk = chacha20_block(key, 0, nonce)[:32]
+              enc = chacha20_xor(key, 1, nonce, plaintext)
+              mac_data = enc + b"\x00" * ((16 - len(enc) % 16) % 16) + struct.pack("<QQ", 0, len(enc))
+              return enc + poly1305_mac(mac_data, otk)
+
+          def hkdf_sha256(ikm, salt, info):
+              salt_b = salt if salt else b"\x00" * 32
+              prk = hmac.new(salt_b, ikm, hashlib.sha256).digest()
+              return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+
+          def encrypt_age_scrypt_armor(plaintext_bytes, pw, work_factor=14):
+              file_key = os.urandom(16)
+              raw_salt = os.urandom(16)
+              full_salt = b"age-encryption.org/v1/scrypt" + raw_salt
+              wrap_key = hashlib.scrypt(
+                  pw.encode("utf-8"), salt=full_salt, n=1 << work_factor, r=8, p=1, maxmem=0x7fffffff, dklen=32
+              )
+              wrapped_fk = aead_encrypt(wrap_key, b"\x00" * 12, file_key)
+              hdr_body = (
+                  f"age-encryption.org/v1\n"
+                  f"-> scrypt {b64_raw(raw_salt)} {work_factor}\n"
+                  f"{b64_raw(wrapped_fk)}\n"
+                  f"---"
+              ).encode("ascii")
+              hmac_key = hkdf_sha256(file_key, b"", b"header")
+              hdr_mac = hmac.new(hmac_key, hdr_body, hashlib.sha256).digest()
+              header_full = hdr_body + b" " + b64_raw(hdr_mac).encode("ascii") + b"\n"
+
+              p_nonce = os.urandom(16)
+              p_key = hkdf_sha256(file_key, p_nonce, b"payload")
+              chunks = [plaintext_bytes[i:i + 65536] for i in range(0, len(plaintext_bytes), 65536)] or [b""]
+              stream_out = bytearray(p_nonce)
+              for idx, chk in enumerate(chunks):
+                  is_last = 1 if idx == len(chunks) - 1 else 0
+                  c_nonce = idx.to_bytes(11, "big") + bytes([is_last])
+                  stream_out.extend(aead_encrypt(p_key, c_nonce, chk))
+
+              b64_body = base64.b64encode(header_full + bytes(stream_out)).decode("ascii")
+              wrapped_lines = [b64_body[i:i + 64] for i in range(0, len(b64_body), 64)]
+              return "-----BEGIN AGE ENCRYPTED FILE-----\n" + "\n".join(wrapped_lines) + "\n-----END AGE ENCRYPTED FILE-----\n"
+
+          with open(age_path, "w", encoding="utf-8") as f:
+              f.write(encrypt_age_scrypt_armor(payload.encode("utf-8"), passphrase, work_factor=14))
           run_age_with_pty(["-d", "-o", verify_path, age_path], passphrase)
 
           with open(verify_path, "r", encoding="utf-8") as f:
@@ -130,7 +212,7 @@ jobs:
           with open(out_file, "a", encoding="utf-8") as f:
               f.write("has_age=true\n")
               f.write(f"age_file={age_path}\n")
-          print("✅ 已在 Runner 内存完成 age -p -a 加密并校验回解一致。")
+          print("✅ 已在 Runner 内存完成 age (scrypt work_factor=14, 16MB) 加密并经官方 age -d 校验回解一致。")
           PY
 
       - name: Build single-file sbox.sh and scan for secret leaks

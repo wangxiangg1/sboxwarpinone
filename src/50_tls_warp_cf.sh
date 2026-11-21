@@ -132,6 +132,7 @@ while time.monotonic() < deadline:
         break
     buf += chunk
     if sent == 0 and b"passphrase" in buf.lower() and buf.rstrip().endswith(b":"):
+        time.sleep(0.03)
         os.write(master, (pw + "\n").encode("utf-8"))
         buf = b""
         sent = 1
@@ -149,10 +150,16 @@ if timed_out:
         pass
 _, st = os.waitpid(pid, 0)
 if timed_out:
+    sys.stderr.write("age: decrypt timed out\n")
     sys.exit(124)
-if hasattr(os, "waitstatus_to_exitcode"):
-    sys.exit(os.waitstatus_to_exitcode(st))
-sys.exit(0 if st == 0 else (((st >> 8) & 0xff) or 1))
+rc = os.waitstatus_to_exitcode(st) if hasattr(os, "waitstatus_to_exitcode") else (0 if st == 0 else (((st >> 8) & 0xff) or 1))
+if rc != 0:
+    msg = buf.decode("utf-8", "replace").strip()
+    if msg:
+        sys.stderr.write(msg + "\n")
+    elif rc < 0 or rc == 137:
+        sys.stderr.write(f"age: terminated by signal (rc={rc}, possibly OOM)\n")
+sys.exit(rc)
 __SBOX_AGE_PY_EOF__
         _rc=$?
         unset _SBOX_AGE_PW 2>/dev/null || true
