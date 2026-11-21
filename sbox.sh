@@ -2077,6 +2077,106 @@ ensure_age_bin() {
     return 1
 }
 
+_age_decrypt_with_passphrase() {
+    _out_file="$1"
+    _in_file="$2"
+    _pw="$3"
+
+    if command -v python3 >/dev/null 2>&1 && python3 -c 'import pty, select' >/dev/null 2>&1; then
+        _SBOX_AGE_PW="$_pw" python3 - "$_out_file" "$_in_file" <<'__SBOX_AGE_PY_EOF__'
+import os, pty, select, signal, sys, time
+
+out_f, in_f = sys.argv[1], sys.argv[2]
+pw = os.environ.get("_SBOX_AGE_PW", "")
+pid, master = pty.fork()
+if pid == 0:
+    os.execvp("age", ["age", "-d", "-o", out_f, in_f])
+
+buf = b""
+sent = 0
+timed_out = False
+deadline = time.monotonic() + 20.0
+while time.monotonic() < deadline:
+    r, _, _ = select.select([master], [], [], 0.5)
+    if not r:
+        continue
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    buf += chunk
+    if sent == 0 and b"passphrase" in buf.lower() and buf.rstrip().endswith(b":"):
+        os.write(master, (pw + "\n").encode("utf-8"))
+        buf = b""
+        sent = 1
+else:
+    timed_out = True
+
+try:
+    os.close(master)
+except OSError:
+    pass
+if timed_out:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+_, st = os.waitpid(pid, 0)
+if timed_out:
+    sys.exit(124)
+if hasattr(os, "waitstatus_to_exitcode"):
+    sys.exit(os.waitstatus_to_exitcode(st))
+sys.exit(0 if st == 0 else (((st >> 8) & 0xff) or 1))
+__SBOX_AGE_PY_EOF__
+        _rc=$?
+        unset _SBOX_AGE_PW 2>/dev/null || true
+        return $_rc
+    fi
+
+    if ! command -v expect >/dev/null 2>&1; then
+        info "📦 正在准备交互辅助工具 expect..."
+        install_pkg expect >/dev/null 2>&1 || true
+    fi
+    if command -v expect >/dev/null 2>&1; then
+        _SBOX_AGE_PW="$_pw" expect -f - "$_out_file" "$_in_file" <<'__SBOX_AGE_EXP_EOF__'
+log_user 0
+set timeout 20
+set pw $env(_SBOX_AGE_PW)
+set out [lindex $argv 0]
+set in  [lindex $argv 1]
+spawn -noecho age -d -o $out $in
+set sent 0
+expect {
+    -re {[Pp]assphrase.*:} {
+        if {$sent == 0} {
+            send -- "$pw\r"
+            set sent 1
+            exp_continue
+        }
+    }
+    eof
+    timeout {
+        catch { close -i $spawn_id }
+        exit 124
+    }
+}
+set res [wait]
+if {[llength $res] >= 4 && [lindex $res 2] == 0} {
+    exit [lindex $res 3]
+}
+exit 1
+__SBOX_AGE_EXP_EOF__
+        _rc=$?
+        unset _SBOX_AGE_PW 2>/dev/null || true
+        return $_rc
+    fi
+
+    warn "⚠️ 未检测到 python3 或 expect，回退为原生隐藏输入模式。"
+    age -d -o "$_out_file" "$_in_file"
+}
+
 decrypt_embedded_origin_cert() {
     if ! has_embedded_origin_age; then
         err "❌ 当前脚本副本尚未经 GitHub Actions 注入加密证书密文。"
@@ -2098,8 +2198,14 @@ decrypt_embedded_origin_cert() {
 
     _try=1
     while [ "$_try" -le 3 ]; do
-        info "🔑 请输入内置 Cloudflare Origin 证书解锁密码（第 ${_try}/3 次，输入时不显示字符）："
-        if age -d -o "$_plain_file" "$_age_file"; then
+        info "🔑 请输入内置 Cloudflare Origin 证书解锁密码（第 ${_try}/3 次，输入内容直接可见）："
+        ask "Enter passphrase: "
+        _age_pw=$(printf '%s' "$REPLY" | tr -d '\r')
+        REPLY=""
+        if [ -z "$_age_pw" ]; then
+            warn "⚠️ 密码不能为空。"
+        elif _age_decrypt_with_passphrase "$_plain_file" "$_age_file" "$_age_pw"; then
+            _age_pw=""
             _dom=$(awk -F= '/^DOMAIN=/{print $2; exit}' "$_plain_file" | tr -d ' \r\n')
             awk '/^---CERT---$/{f=1;next}/^---KEY---$/{f=0}f' "$_plain_file" > "$_crt_tmp"
             awk '/^---KEY---$/{f=1;next}f' "$_plain_file" > "$_key_tmp"
@@ -2124,13 +2230,16 @@ decrypt_embedded_origin_cert() {
             err "❌ 解密后的证书或私钥内容无效。"
             rm -f "$_age_file"
             return 1
+        else
+            _age_pw=""
+            rm -f "$_plain_file"
+            warn "⚠️ 解密失败（请检查所输入的密码、大小写及前后是否多出空格）。"
         fi
-        rm -f "$_plain_file"
-        warn "⚠️ 解密失败（密码错误或当前终端无法读取密码输入）。"
         [ "$_try" -lt 3 ] && { confirm "是否重新输入密码重试？" || break; }
         _try=$((_try + 1))
     done
 
+    _age_pw=""
     rm -f "$_age_file" "$_plain_file" "$_crt_tmp" "$_key_tmp"
     return 1
 }
@@ -2410,40 +2519,40 @@ __EMBEDDED_WARP_FIX_EOF__
 write_embedded_origin_age() {
     cat <<'__EMBEDDED_ORIGIN_AGE_EOF__' > "$1"
 -----BEGIN AGE ENCRYPTED FILE-----
-YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBrT0JkU3o3bzNPWU5qWGRO
-OTJESlNBIDE4CkpaNnZ6SGxyL3BzaGV1VXo0TVJpQ01mTERERjdUa1lMaWNqeDE5
-SFIrNlUKLS0tIDBWWlRsNUp0VkY2S0U1anAwOUxXOVcraURkdnZxMEJVc0xBMXF1
-NTFQQk0K91peIDeW37aDixI604/9u3bXAPebZqgvS9/xX16F8v61YZtlDnU8Qww8
-qWakwQ+vzcgSkCE77VwIimwHW58Bld5kBJcnhd/yVN/DaP7N8MA1TxRbgP6Z+mK+
-bXY19PoCVb4wGJdhb6Rcrk9Wj0N3cagBFfbNYNUuESojMrTHJpxvTR5EscMaAKzm
-hQzE3v6AL3s6usI4Yd0bzWn1Q5mayt5KdKznOWlz7VDEj6PGTPWcZgv5XFhv/C1M
-rRplrYvtH/nxFHFImEYFbpmXGWbKW37vwxDOJh+L5mpDcNlR/rxG4Oqh17gR0Z15
-QxQ2Tt4ERj4cBFLf+45B0SsncOtUGLO3FGSDbhA06lOsoqjvkPuffAtLlcD//8il
-7YVB132i7ZV8ECBrnymc05pP1by70v7v2Z0umStIhP+BnWoqvIXWwrDsqlGKH4G7
-ara2pzt59SNEOpnT8duCvTdu0ywHXnjZIcVphUaE6V9QifzFZ5tGQm0y69LKjMyX
-WAgvTY32IM+3+7ZUvO700n6CqOgmN6QedGV5ei1c4oRZ2WwZ5iu7kYVTEDS5Puhl
-LPveQPhMP1UGzyWA9BpG0ep1gJifM8RNkExeHr1mPImplfiBM3kGvZK++gvZN3N+
-ubAZhiyG3ChygiELo2yaplw9Um9IvGLH/rNLRMsLk15+f9QLRupRvCoTfF9I1cYw
-BoUpc8WO9Aw5iPyRySfoJF53dyonA9BG/mJ0/g9i3UCKBq2BncDrdGNv73Bvm0v+
-hAIkVeRAJgmwaMCjJNec4npzAnTOpA641cjNziNDwyn8MZ8F28QpVYah0N6RENhi
-dTGoJu40WRH3ObeWOEKU2YzvDoZMlcVwTJzdOfm8lEd5mVM3vbsqXCwwc1/3ZSRm
-2PnzyYH5jC9LSWfFMHyfPFzKshE4EV+In7RK8vRKKKEfQe+GbQE61bDxfuL+lJsg
-Xa95WlcNNw//YyYz66xcR3qym8ugzkAVVL+nJo1X7niZgRF8DoD9DmEaBn8L+pwS
-+G//Ky3F1K1pdlynMravM4JUaDEYIz8Bo7MjyjkGjFB9A5HL+RWSRyO9oeRvnkr2
-BrGcOhUTXudzeI/lIOM26P01h/jMKtqRUsmByK5xgTyuFzBnxCP0rGQlaD7qhLGt
-u7Ytoc0szAFH286ZH4jH+O2vL63wRlpHh9eDz51ZetIPsA8v5gPjUbOHGr7uzrs3
-smfcs/eV9uj1Z4HErLUCIoVxAL+zATFcEyWyYlMSIPo/ZND0fgQgu0y6pbAB7FjV
-9Y+/B6Ub2olM87rbiqs2W3SWoZ2Dc1O1opN7HTJyAkbA7Bu7YLszR2DE2gNZvtZO
-Gphp498+zr1c8efFVA7ymUXvpSHYsvJ01irO5fBTC/7QAC6YdzOURVImQcm7I4w9
-Y7jmjfE6HcLHyqjZxpKflBXSB3rsQVkt6ZtjtKwdn+j+C0SGHFtyywwxzeE4aQWe
-VIFKA1bi80V2XidvC+PbKVSfdreZ6MCHxdFtpdoAjQr6wM9xC57BKiKKQKKYt20O
-fvoHoLa5+LD8y8eWWbDAihwA9/toVZ/0i3S5IlVxq8GIuV2CEGybamDUfQ1SB5Dx
-yjWPfVD07ir5W8XMLuSFX2GT7M0fWpKSkKc3stOBwZ3u6PRPfx0893vNZeXtI5pz
-6EHmu99APtRWl8/+8b9D8mgs60e6keKg3+PexVdYwNmukoE5qM8omWLk5Y4sN42Y
-fx4UsV2c8hfCXvV64EZw0RN8GYv8XADIplHn9/5T2FV6ermPpkjjmJHsGpwyuU6n
-j5h8G+u06J83X+6UryVBaS8xE+TT9XYGOmhl+YYSYaL98SdtMy3wYZ/DaEHT9uHD
-Z7KRDlUB96f0AyLmk58Hr1WPNcE94daiJQcIPyjgtVOsNCpB+UtXmwoLL3qb7uGi
-rn43KZ9Utm4/mRKeaQFC+tcwwvNx
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBiTkd0OXVDTDcyMXNnemdG
+a3FzV1Z3IDE4CnFJMlIwMzFxbjdFMW5tektrZk0vYVRDMHg3UXZJMjZIeERJYjhp
+VUZwQ0UKLS0tIGtEYjluSFdIQ0s4ZG8yMWNZZ3MyKzlWaCswdGsrZzFvRE8rclg2
+eGFVa2sKAiMCfuYijLzElwpBWdmfMjJG4LfiilbgY43umxhER5sDj05T5/cm2Lqs
+HKXEdN8R6HkxTqll3/npy6g7TacEJ4f1Wl649p5kwILTd0iilbeMJF3Y21W+mk7b
+c/vQ/h8Q0qwvcXGfJ/dXyg3Qdtz+2TCvs6X5Z6FTFiF0qmXZSTM1SQvKGjIFfKEZ
+PJYoKsBgzbNxmzebXZgBQsA/Vg68J5hgqkDGCU5bTAMjtLQ48tuihYxGInev0bfc
++nUtzM8F40DdbLNAEDyFcN1ecFScWtpjM7fJpDX/r1VBGA8kQlac3qfSyIP0EUsI
+J+AQvU2ceLh4IUwZeyUCDROSst+FeuiwBdfebGcXkx7lvjWYe9719gErUOs99E5G
+DSUojbMqiV+3BzPPOHXS1tU4kTYdsd8WViJIbRPDKI3+zAizco/XLyy0Prndv+uX
+n5HTPbXRAB3aaY6ZbnQCrQ0vC38w/wjhBy9w7Lr0tc3VEneInMo+ubBEAkTVoECb
+uaxcZrzmM8oPCMMYildVb/soVeSbHZoyd8agQpaQNMFe4pqqe+0oLcWmtH0dF+cu
+n/PIpHpQHFRWc4/hcY9eR58ci+bInNQcvxtB4unIQT3x9cvEqL/p5oog5Ec0lVkH
+yd7m8Yw8h9kn+C+W9iIPoBSJn4og6ZDax5X3ukV88kgIJXcq01o+q8i8vlOZ5B1h
+glaZIwKsrLux2DoRM8GrFKGn2CwqH+rk+nSj3/+/93keClixoytQsUXwdoh2jUjy
+uJbX7oiSwUQvYVTkAJhkM5uKOI0lCk3VYOxZR6VIpaU21zaNBTWrsrJZG3aJWh/t
+ZLo1QWLCdE9dK6yOjXR2yezdLVLo9XNowDMdSQ3fEbmUV29hNTDqH2JxlIzd8H5s
+4941Y0vp7CvIbCI7LgYDbQm3P74zmK8qMper5gW1H2y2UNK6jpHvTqeNy80y+5La
+YW+hFoia1PEjldlLet/HpKPgliM6H/Dzf3d9rFGe61O+/z8POmSaS8+9JYRvrLXC
+OeCcbkkw6zF4d44CySSP/WojscywNxkF4hek7c5JdMOtAZ8+U9sQtr4UnqBKpi9K
+yIeDAipKAxKwioEB3mNbUM7Ns3eNdTUonZYGs2NQ+uROcIHPX4irBaFpQKY+AE8D
+e/7mVWUPg5pZhNvtWct8LczohtD2ZZUKL8u+bQyW3Nl7I23tUEsLN/ODEJjvyVCd
+2ZvCGqc/h4mYQrxOQ83cnwsJpKlPV7Z3xvKeaJKEzDm/VUtX94ao6Y7XFsT7cOdS
+Vl1Im6RhPRSTOuYXH+AH6/8fTiH9GnDMixFO4IPLDsnq3b2Gh411Mi02whzAanLn
+5Vuwx+hfEt7VnmAF/2lin/tB25b/ByNR0UF6gVe3z6NLBOT/uVMsfA8gCCj7I4yA
+eb2+5txAusp3Cs5owhZMvRoZtD0y4UhPzQh7L1klAAhA6K/RMvbCyptsSqPtqsr6
++Cnd/N5kjjEjThIh4XtshNU8F24weBzxcvNlK+CnJ0oJF1kIwBVXRUYBY3T1xQ/K
+v6tv1JeHF6T3a8yc5ajdkCHTfxjXFukaY/VLCkwAjbppBkGBZ0Va+1qfwyjSM3CP
+DSoDpqR4C3zc4DmKJzLNfmLVq336HSJJT7G1m2ove2L9D5C+v+c/75AljfHoiUTo
+dupd3Qwa1zTTUA56vTVa8qBp/s3ykJpinG0+RG3sb0tlLFkzN+6viWIyaUV9vxAi
+vvl7uwydsaiMEVo5XEvifiBOWxd0jHdrHHXrfMHVnT9/oMpF2Enq6EYkACjCtcZk
+Jwq9aiOCTukIUKBdsOfLC+LE056Mdb2aD9LTQpRqKA7igq0tFglO3WWIEB0yh/0Z
++Q2fZBVMJL69DLWos7Zn8aKFoYf5H2j2+0BVvzUvrfpcCox3yOtQ408+2hUgymM6
+ar8v8bjcPp3XEk5DOCGhEhZL/0P3
 -----END AGE ENCRYPTED FILE-----
 __EMBEDDED_ORIGIN_AGE_EOF__
 }
