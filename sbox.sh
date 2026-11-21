@@ -2108,6 +2108,7 @@ while time.monotonic() < deadline:
         break
     buf += chunk
     if sent == 0 and b"passphrase" in buf.lower() and buf.rstrip().endswith(b":"):
+        time.sleep(0.03)
         os.write(master, (pw + "\n").encode("utf-8"))
         buf = b""
         sent = 1
@@ -2125,10 +2126,16 @@ if timed_out:
         pass
 _, st = os.waitpid(pid, 0)
 if timed_out:
+    sys.stderr.write("age: decrypt timed out\n")
     sys.exit(124)
-if hasattr(os, "waitstatus_to_exitcode"):
-    sys.exit(os.waitstatus_to_exitcode(st))
-sys.exit(0 if st == 0 else (((st >> 8) & 0xff) or 1))
+rc = os.waitstatus_to_exitcode(st) if hasattr(os, "waitstatus_to_exitcode") else (0 if st == 0 else (((st >> 8) & 0xff) or 1))
+if rc != 0:
+    msg = buf.decode("utf-8", "replace").strip()
+    if msg:
+        sys.stderr.write(msg + "\n")
+    elif rc < 0 or rc == 137:
+        sys.stderr.write(f"age: terminated by signal (rc={rc}, possibly OOM)\n")
+sys.exit(rc)
 __SBOX_AGE_PY_EOF__
         _rc=$?
         unset _SBOX_AGE_PW 2>/dev/null || true
@@ -2519,40 +2526,40 @@ __EMBEDDED_WARP_FIX_EOF__
 write_embedded_origin_age() {
     cat <<'__EMBEDDED_ORIGIN_AGE_EOF__' > "$1"
 -----BEGIN AGE ENCRYPTED FILE-----
-YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBiTkd0OXVDTDcyMXNnemdG
-a3FzV1Z3IDE4CnFJMlIwMzFxbjdFMW5tektrZk0vYVRDMHg3UXZJMjZIeERJYjhp
-VUZwQ0UKLS0tIGtEYjluSFdIQ0s4ZG8yMWNZZ3MyKzlWaCswdGsrZzFvRE8rclg2
-eGFVa2sKAiMCfuYijLzElwpBWdmfMjJG4LfiilbgY43umxhER5sDj05T5/cm2Lqs
-HKXEdN8R6HkxTqll3/npy6g7TacEJ4f1Wl649p5kwILTd0iilbeMJF3Y21W+mk7b
-c/vQ/h8Q0qwvcXGfJ/dXyg3Qdtz+2TCvs6X5Z6FTFiF0qmXZSTM1SQvKGjIFfKEZ
-PJYoKsBgzbNxmzebXZgBQsA/Vg68J5hgqkDGCU5bTAMjtLQ48tuihYxGInev0bfc
-+nUtzM8F40DdbLNAEDyFcN1ecFScWtpjM7fJpDX/r1VBGA8kQlac3qfSyIP0EUsI
-J+AQvU2ceLh4IUwZeyUCDROSst+FeuiwBdfebGcXkx7lvjWYe9719gErUOs99E5G
-DSUojbMqiV+3BzPPOHXS1tU4kTYdsd8WViJIbRPDKI3+zAizco/XLyy0Prndv+uX
-n5HTPbXRAB3aaY6ZbnQCrQ0vC38w/wjhBy9w7Lr0tc3VEneInMo+ubBEAkTVoECb
-uaxcZrzmM8oPCMMYildVb/soVeSbHZoyd8agQpaQNMFe4pqqe+0oLcWmtH0dF+cu
-n/PIpHpQHFRWc4/hcY9eR58ci+bInNQcvxtB4unIQT3x9cvEqL/p5oog5Ec0lVkH
-yd7m8Yw8h9kn+C+W9iIPoBSJn4og6ZDax5X3ukV88kgIJXcq01o+q8i8vlOZ5B1h
-glaZIwKsrLux2DoRM8GrFKGn2CwqH+rk+nSj3/+/93keClixoytQsUXwdoh2jUjy
-uJbX7oiSwUQvYVTkAJhkM5uKOI0lCk3VYOxZR6VIpaU21zaNBTWrsrJZG3aJWh/t
-ZLo1QWLCdE9dK6yOjXR2yezdLVLo9XNowDMdSQ3fEbmUV29hNTDqH2JxlIzd8H5s
-4941Y0vp7CvIbCI7LgYDbQm3P74zmK8qMper5gW1H2y2UNK6jpHvTqeNy80y+5La
-YW+hFoia1PEjldlLet/HpKPgliM6H/Dzf3d9rFGe61O+/z8POmSaS8+9JYRvrLXC
-OeCcbkkw6zF4d44CySSP/WojscywNxkF4hek7c5JdMOtAZ8+U9sQtr4UnqBKpi9K
-yIeDAipKAxKwioEB3mNbUM7Ns3eNdTUonZYGs2NQ+uROcIHPX4irBaFpQKY+AE8D
-e/7mVWUPg5pZhNvtWct8LczohtD2ZZUKL8u+bQyW3Nl7I23tUEsLN/ODEJjvyVCd
-2ZvCGqc/h4mYQrxOQ83cnwsJpKlPV7Z3xvKeaJKEzDm/VUtX94ao6Y7XFsT7cOdS
-Vl1Im6RhPRSTOuYXH+AH6/8fTiH9GnDMixFO4IPLDsnq3b2Gh411Mi02whzAanLn
-5Vuwx+hfEt7VnmAF/2lin/tB25b/ByNR0UF6gVe3z6NLBOT/uVMsfA8gCCj7I4yA
-eb2+5txAusp3Cs5owhZMvRoZtD0y4UhPzQh7L1klAAhA6K/RMvbCyptsSqPtqsr6
-+Cnd/N5kjjEjThIh4XtshNU8F24weBzxcvNlK+CnJ0oJF1kIwBVXRUYBY3T1xQ/K
-v6tv1JeHF6T3a8yc5ajdkCHTfxjXFukaY/VLCkwAjbppBkGBZ0Va+1qfwyjSM3CP
-DSoDpqR4C3zc4DmKJzLNfmLVq336HSJJT7G1m2ove2L9D5C+v+c/75AljfHoiUTo
-dupd3Qwa1zTTUA56vTVa8qBp/s3ykJpinG0+RG3sb0tlLFkzN+6viWIyaUV9vxAi
-vvl7uwydsaiMEVo5XEvifiBOWxd0jHdrHHXrfMHVnT9/oMpF2Enq6EYkACjCtcZk
-Jwq9aiOCTukIUKBdsOfLC+LE056Mdb2aD9LTQpRqKA7igq0tFglO3WWIEB0yh/0Z
-+Q2fZBVMJL69DLWos7Zn8aKFoYf5H2j2+0BVvzUvrfpcCox3yOtQ408+2hUgymM6
-ar8v8bjcPp3XEk5DOCGhEhZL/0P3
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBqbndTWTMwdEtvWld3ZERh
+Tm1BQUt3IDE0CktZK2RNUzVpS2Z0SFNha1lWU1J3VXUrNVgvVjhSVEFXV2FVekgw
+N3R1YzAKLS0tIHI0VEZSNTZnYkh6c3N5RHVOdFZBeXR0Y050K08wR0dtSVMxa0o5
+NFg5MUUK+KS/UkHcRRSHMK484c7kOtyxNlIPaRICjFLgugLW/+omyHGDAdtVl7Hz
+FjOQ16CtO/uMdmXd6py+HdCOlOlsbBEWL72WjbRILleXuSQ0yk/T7nevsM72By2f
+11urTQ5cqdt4bLKy4bCz9M/rBou2sHvImJKP/SmgTU0SGP0X7/kXQ6Gfmkl4PyoQ
+iZDN4bGTgvQEZ32lqEFSzKuTx/yoqP91KFhXH36657w+xYOk68TQA5gOOVr7RUkl
+r5scZ2qKqCImhZ/OXB08WOi9OfHvdA3q0PCw1EBSdxYOKCjEO6dtR3Lqpv1aQ0s1
+SNOcfJfvJvyFMrr9/rWxBLXjOhdhhIysrqXJvg/3xhiDfrNQZobWxNf3Ep77oOGa
+0zmaEz/eoJ/cJuOA7QiQj77ELL2Bnf99Lk79N0oZO86fZDZ2TTwhPTtubwKH9be+
+T9+vGnWX1PspOjsRQYTsOsOqeh+3a2J1u/YDH+sJwkIraVKEA5hJBHdfAyvmHXCe
+YYFYWJoF9FJv/5Eu0npm4rUvFFiorl09il510PnS8E7PGug+k94jRZjE1331rssT
+N8rBL1GFxAsNj29ALQhQ4XXzl5OXis26/h9ILBaASI9ilSCU3XKWr4MlnlP8eJrP
+pyu8+nH6JYQr8qUDyruY3GiqUA1mPcnOwNeoS+iI5PkcKU3i4CSw/ZVJiZ9koTZB
+2Sc77bU/+Izo5k5aeo5NNHn0rtigYRZOhA95uowRShtDvL7w+BZrVLJScy5YQ2Iv
+xLV8y87TdArxNyb4CLKQo2wsja2UocC4jIcEBAHmCVc2BOPZ0YLzU4YFDadGW9HM
+7D1Df9VRKxVkDcz/ATcbwgsEqFod8d3xSSt4b++2i22l1uceOBIyDRUvA3W8cnbG
+20mloRfNPxBzVvSR95N0SrewV7HBXTF20SNLskb3prr9pzH3cnjtm8hOm5JqbSkD
+dezrk4QZtyeKNf/jnqJr6ERytZajTtxB1dgzDDzAdg2CIlFI1mt3S6ghWesC43tB
+VsLpuUyonj8c8xgLUT5U1RvOQzfyhf4oFpe1KHpCEF2V2/kpjNEaXnBJCfFmNghI
+wgbIVL2VxjdH4mWdLQ3kvVlOa4tm+O8XB2U3UirubXoJJuMxz9IOWtjo612ZWiYV
+Vramg/VKolndCLlSS3OLF4UShuvdQU4XpD96CaVa78mxYnu6WlJJGj8MAm9vp0JC
+ssIzzqyix7lcI235VnwhG0zziDgF/6VK+uVzaNjW9HBwaX7D+THWg+n7NiN/mRQy
+ke/troaShaxy7MNM0Dfq/Sb7NTfdlbwhS+yVwvGqGRA9tZGWdHqUJz/DM+S278ms
+CT4Z7TpmAI9t0Xy77RuLLNIoRVXAndk8ZBu/awZklnfgf2c6kATWDEi9F/8+XkZ0
+tVUvHuBm2fpyKJPdkadGoFXAswhgq+gpiN16FHNyGThmz5KG2yCWJVBkWA1JSEvb
+WDur2S//m1CYEulqcwco1FstCKEAcIV2gVaoQq6JmUI2wCiUSzpkfKv5YpoUxWKB
+ZtyLjunb5SOGQyHfwa5n7KsdR1wPyiboDXm6xaYXgRHnzqgff0UY3LXF9BsB0YVb
+Mk+pNWtT/RZTZKcdisfsfThbI2r43W//gTCb2kNThTKejz0wJZ1QgTRci2+JOGYw
+Ha3eJedjlQlH7U4v4Z9ryqAw+JzxwKwVla+pHfj5v//ebasR80RFx6SDRmsXEIwg
+Au5HUm05/FMyMM2k8S6tBgfdAGNlsk1tCJ+alZMkuU20dlkwNuNLZyMfYJkTyYH6
+u7R39ojijtKFvJygVgMRquw/XGdLOFbTB9paMf3hqMUbvQweZSszeSq2eUtUphhw
+A3rJjM/skgTO3P5rGdVyBxxMhg9t2UxkWHBxmvJXaESc+sVCkEisMN22aUS+lH38
+jP0egRG2dp08+K2IzGbjdNZGbgON
 -----END AGE ENCRYPTED FILE-----
 __EMBEDDED_ORIGIN_AGE_EOF__
 }
