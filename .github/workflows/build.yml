@@ -1,0 +1,268 @@
+name: Build Encrypted sbox.sh
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "src/**"
+      - "build.sh"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-sbox:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install age and openssl
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends age openssl python3
+
+      - name: Encrypt Origin TLS Secrets with age
+        id: encrypt
+        env:
+          AGE_PASSPHRASE: ${{ secrets.AGE_PASSPHRASE }}
+          ORIGIN_DOMAIN: ${{ secrets.ORIGIN_DOMAIN }}
+          ORIGIN_CERT: ${{ secrets.ORIGIN_CERT }}
+          ORIGIN_KEY: ${{ secrets.ORIGIN_KEY }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, hmac, os, pty, select, struct, subprocess, sys, time
+
+          passphrase = os.environ.get("AGE_PASSPHRASE", "").strip("\r\n")
+          domain = os.environ.get("ORIGIN_DOMAIN", "").strip()
+          cert = os.environ.get("ORIGIN_CERT", "").replace("\r\n", "\n").strip()
+          key = os.environ.get("ORIGIN_KEY", "").replace("\r\n", "\n").strip()
+          tmp_dir = os.environ["RUNNER_TEMP"]
+          out_file = os.environ["GITHUB_OUTPUT"]
+
+          if not (passphrase and cert and key):
+              print("⚠️ 未检测到完整的 Origin TLS Secrets（需要 AGE_PASSPHRASE / ORIGIN_CERT / ORIGIN_KEY），本次将构建通用版 sbox.sh。")
+              with open(out_file, "a", encoding="utf-8") as f:
+                  f.write("has_age=false\n")
+              sys.exit(0)
+
+          crt_path = os.path.join(tmp_dir, "origin.crt")
+          key_path = os.path.join(tmp_dir, "origin.key")
+          payload_path = os.path.join(tmp_dir, "payload.txt")
+          age_path = os.path.join(tmp_dir, "origin.age")
+          verify_path = os.path.join(tmp_dir, "verify.txt")
+
+          with open(crt_path, "w", encoding="utf-8") as f:
+              f.write(cert + "\n")
+          with open(key_path, "w", encoding="utf-8") as f:
+              f.write(key + "\n")
+
+          # 校验证书与私钥有效性及公钥匹配度
+          c_pub = subprocess.check_output(["openssl", "x509", "-in", crt_path, "-pubkey", "-noout"])
+          k_pub = subprocess.check_output(["openssl", "pkey", "-in", key_path, "-pubout"])
+          if c_pub != k_pub:
+              raise SystemExit("❌ ORIGIN_CERT 与 ORIGIN_KEY 公钥不匹配，请检查 Secrets 粘贴是否完整。")
+
+          if not domain:
+              ext = subprocess.check_output(
+                  ["openssl", "x509", "-in", crt_path, "-noout", "-ext", "subjectAltName"],
+                  text=True,
+              )
+              for token in ext.replace(",", " ").split():
+                  if token.startswith("DNS:") and not token.startswith("DNS:*."):
+                      domain = token[4:].strip()
+                      break
+          if not domain:
+              domain = "origin"
+
+          payload = f"DOMAIN={domain}\n---CERT---\n{cert}\n---KEY---\n{key}\n"
+          with open(payload_path, "w", encoding="utf-8") as f:
+              f.write(payload)
+
+          def run_age_with_pty(args, pw):
+              pid, master = pty.fork()
+              if pid == 0:
+                  os.execvp("age", ["age"] + args)
+              buf = b""
+              sent = 0
+              deadline = time.monotonic() + 20.0
+              while time.monotonic() < deadline:
+                  r, _, _ = select.select([master], [], [], 1.0)
+                  if not r:
+                      continue
+                  try:
+                      chunk = os.read(master, 4096)
+                  except OSError:
+                      break
+                  if not chunk:
+                      break
+                  buf += chunk
+                  low = buf.lower()
+                  if b"passphrase" in low and buf.rstrip().endswith(b":"):
+                      os.write(master, (pw + "\n").encode("utf-8"))
+                      buf = b""
+                      sent += 1
+              try:
+                  os.close(master)
+              except OSError:
+                  pass
+              _, status = os.waitpid(pid, 0)
+              rc = os.waitstatus_to_exitcode(status)
+              if rc != 0 or sent == 0:
+                  raise SystemExit(f"❌ age 执行失败 (rc={rc}, prompts={sent})")
+
+          def b64_raw(data):
+              return base64.b64encode(data).decode("ascii").rstrip("=")
+
+          def rotl32(v, c):
+              return ((v << c) & 0xffffffff) | (v >> (32 - c))
+
+          def qr(x, a, b, c, d):
+              x[a] = (x[a] + x[b]) & 0xffffffff; x[d] = rotl32(x[d] ^ x[a], 16)
+              x[c] = (x[c] + x[d]) & 0xffffffff; x[b] = rotl32(x[b] ^ x[c], 12)
+              x[a] = (x[a] + x[b]) & 0xffffffff; x[d] = rotl32(x[d] ^ x[a], 8)
+              x[c] = (x[c] + x[d]) & 0xffffffff; x[b] = rotl32(x[b] ^ x[c], 7)
+
+          def chacha20_block(key, counter, nonce):
+              st = list(struct.unpack("<4I8I1I3I", b"expand 32-byte k" + key + struct.pack("<I", counter) + nonce))
+              w = st[:]
+              for _ in range(10):
+                  qr(w, 0, 4, 8, 12); qr(w, 1, 5, 9, 13); qr(w, 2, 6, 10, 14); qr(w, 3, 7, 11, 15)
+                  qr(w, 0, 5, 10, 15); qr(w, 1, 6, 11, 12); qr(w, 2, 7, 8, 13); qr(w, 3, 4, 9, 14)
+              return struct.pack("<16I", *((w[i] + st[i]) & 0xffffffff for i in range(16)))
+
+          def chacha20_xor(key, counter, nonce, data):
+              out = bytearray()
+              for i in range(0, len(data), 64):
+                  ks = chacha20_block(key, counter + (i // 64), nonce)
+                  chunk = data[i:i + 64]
+                  out.extend(b ^ k for b, k in zip(chunk, ks))
+              return bytes(out)
+
+          def poly1305_mac(msg, key):
+              r = int.from_bytes(key[:16], "little") & 0x0ffffffc0ffffffc0ffffffc0fffffff
+              s = int.from_bytes(key[16:32], "little")
+              p = (1 << 130) - 5
+              acc = 0
+              for i in range(0, len(msg), 16):
+                  blk = msg[i:i + 16]
+                  n = int.from_bytes(blk + b"\x01", "little")
+                  acc = ((acc + n) * r) % p
+              return ((acc + s) & ((1 << 128) - 1)).to_bytes(16, "little")
+
+          def aead_encrypt(key, nonce, plaintext):
+              otk = chacha20_block(key, 0, nonce)[:32]
+              enc = chacha20_xor(key, 1, nonce, plaintext)
+              mac_data = enc + b"\x00" * ((16 - len(enc) % 16) % 16) + struct.pack("<QQ", 0, len(enc))
+              return enc + poly1305_mac(mac_data, otk)
+
+          def hkdf_sha256(ikm, salt, info):
+              salt_b = salt if salt else b"\x00" * 32
+              prk = hmac.new(salt_b, ikm, hashlib.sha256).digest()
+              return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+
+          def encrypt_age_scrypt_armor(plaintext_bytes, pw, work_factor=14):
+              file_key = os.urandom(16)
+              raw_salt = os.urandom(16)
+              full_salt = b"age-encryption.org/v1/scrypt" + raw_salt
+              wrap_key = hashlib.scrypt(
+                  pw.encode("utf-8"), salt=full_salt, n=1 << work_factor, r=8, p=1, maxmem=0x7fffffff, dklen=32
+              )
+              wrapped_fk = aead_encrypt(wrap_key, b"\x00" * 12, file_key)
+              hdr_body = (
+                  f"age-encryption.org/v1\n"
+                  f"-> scrypt {b64_raw(raw_salt)} {work_factor}\n"
+                  f"{b64_raw(wrapped_fk)}\n"
+                  f"---"
+              ).encode("ascii")
+              hmac_key = hkdf_sha256(file_key, b"", b"header")
+              hdr_mac = hmac.new(hmac_key, hdr_body, hashlib.sha256).digest()
+              header_full = hdr_body + b" " + b64_raw(hdr_mac).encode("ascii") + b"\n"
+
+              p_nonce = os.urandom(16)
+              p_key = hkdf_sha256(file_key, p_nonce, b"payload")
+              chunks = [plaintext_bytes[i:i + 65536] for i in range(0, len(plaintext_bytes), 65536)] or [b""]
+              stream_out = bytearray(p_nonce)
+              for idx, chk in enumerate(chunks):
+                  is_last = 1 if idx == len(chunks) - 1 else 0
+                  c_nonce = idx.to_bytes(11, "big") + bytes([is_last])
+                  stream_out.extend(aead_encrypt(p_key, c_nonce, chk))
+
+              b64_body = base64.b64encode(header_full + bytes(stream_out)).decode("ascii")
+              wrapped_lines = [b64_body[i:i + 64] for i in range(0, len(b64_body), 64)]
+              return "-----BEGIN AGE ENCRYPTED FILE-----\n" + "\n".join(wrapped_lines) + "\n-----END AGE ENCRYPTED FILE-----\n"
+
+          with open(age_path, "w", encoding="utf-8") as f:
+              f.write(encrypt_age_scrypt_armor(payload.encode("utf-8"), passphrase, work_factor=14))
+          run_age_with_pty(["-d", "-o", verify_path, age_path], passphrase)
+
+          with open(verify_path, "r", encoding="utf-8") as f:
+              if f.read() != payload:
+                  raise SystemExit("❌ age 加密后回解验证不一致！")
+
+          for p in (crt_path, key_path, payload_path, verify_path):
+              if os.path.exists(p):
+                  os.remove(p)
+
+          with open(out_file, "a", encoding="utf-8") as f:
+              f.write("has_age=true\n")
+              f.write(f"age_file={age_path}\n")
+          print("✅ 已在 Runner 内存完成 age (scrypt work_factor=14, 16MB) 加密并经官方 age -d 校验回解一致。")
+          PY
+
+      - name: Build single-file sbox.sh and scan for secret leaks
+        env:
+          HAS_AGE: ${{ steps.encrypt.outputs.has_age }}
+          AGE_ARMOR_FILE: ${{ steps.encrypt.outputs.age_file }}
+          ORIGIN_DOMAIN: ${{ secrets.ORIGIN_DOMAIN }}
+          AGE_PASSPHRASE: ${{ secrets.AGE_PASSPHRASE }}
+        run: |
+          if [ "$HAS_AGE" = "true" ]; then
+            AGE_ARMOR_FILE="$AGE_ARMOR_FILE" sh build.sh
+            rm -f "$AGE_ARMOR_FILE"
+          else
+            AGE_ARMOR_FILE="" sh build.sh
+          fi
+
+          python3 - <<'PY'
+          import os
+
+          with open("sbox.sh", "r", encoding="utf-8") as f:
+              text = f.read()
+
+          forbidden = [
+              "-----BEGIN PRIVATE KEY-----",
+              "-----BEGIN RSA PRIVATE KEY-----",
+              "-----BEGIN EC PRIVATE KEY-----",
+              "-----BEGIN OPENSSH PRIVATE KEY-----",
+              "-----BEGIN CERTIFICATE-----",
+          ]
+          for item in (os.environ.get("ORIGIN_DOMAIN", "").strip(), os.environ.get("AGE_PASSPHRASE", "").strip("\r\n")):
+              if item:
+                  forbidden.append(item)
+
+          for bad in forbidden:
+              if bad in text:
+                  raise SystemExit(f"❌ 安全阻断：产物 sbox.sh 中检测到敏感内容残留 ({len(bad)} chars)")
+
+          if os.environ.get("HAS_AGE") == "true":
+              if "BEGIN AGE ENCRYPTED FILE" not in text or "END AGE ENCRYPTED FILE" not in text:
+                  raise SystemExit("❌ 产物缺少 age 密文块")
+          print("✅ 防泄密自检与语法构建全部通过。")
+          PY
+
+      - name: Commit built sbox.sh back to branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sbox.sh
+          if git diff --cached --quiet; then
+            echo "ℹ️ sbox.sh 无变更，跳过提交。"
+          else
+            git commit -m "chore: build sbox.sh [skip ci]"
+            git push
+          fi
