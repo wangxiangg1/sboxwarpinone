@@ -3,7 +3,7 @@
 # ==============================================================================
 # 脚本名称: sbox.sh  (Alpine / Debian / Ubuntu 通用轻量 sing-box 多入站安装 + 管理脚本)
 # 仓库项目: sboxwarpinone (全合一单文件版，支持内核态 WARP 多出口容灾与 age 加密内置 Origin TLS 证书)
-# 版本    : 1.1.7
+# 版本    : 1.1.8
 # 核心特性:
 #   - 多入站管理：同实例原生支持 Hysteria2 / VLESS+WS (CF CDN) / VLESS+Reality 共存
 #   - 新版无警告配置：完全对齐 sing-box 1.12+ / 1.14+ DNS 与 default_domain_resolver 语法
@@ -39,7 +39,7 @@ CERT_DIR="/etc/sing-box/certs"
 KEY_MAP="/etc/sing-box/reality_keys.json"
 NODE_ENV="/etc/sing-box/node.env"
 LOG_FILE="/var/log/sing-box.log"
-SCRIPT_VERSION="1.1.7"
+SCRIPT_VERSION="1.1.8"
 GH_PROXY="${GH_PROXY:-}"
 
 # 透明转发：以 sbox 名义被调用且带非保留参数时，直接交给官方 sing-box 核心
@@ -101,6 +101,7 @@ pause() { printf "\n%b按回车返回菜单...%b" "$C_B" "$C_N"; read -r _ || ex
 ask() {
     printf "%b›%b %s" "$C_G" "$C_N" "$1"
     read -r REPLY || exit 0
+    REPLY=$(printf '%s' "$REPLY" | tr -d '\r')
 }
 
 confirm() {
@@ -2387,6 +2388,7 @@ WARP_DIR="${CONF_DIR}/warp"
 WARP_FILE="${WARP_DIR}/accounts.json"
 WARP_ROUTE_BACKUP="${WARP_DIR}/route-final.before-warp"
 WARP_FALLBACK_STATE="${WARP_DIR}/fallback.state"
+WARP_PAUSE_FLAG="${WARP_DIR}/paused"
 WARP_FALLBACK_DIRECT="${WARP_FALLBACK_DIRECT:-1}"
 WARP_LOG="/var/log/sbox-warp.log"
 WARP_LOCK_DIR="${WARP_DIR}/.lock"
@@ -2892,6 +2894,8 @@ warp_show_channel_summary() {
         else
             printf '  当前胜出  未开启本机控制口（执行 sbox warp api 开启后实时显示）\n'
         fi
+    elif warp_is_paused; then
+        printf '  默认出站  %s（WARP 已临时暂停，选恢复可一键切回）\n' "$_warp_default"
     elif [ -f "$WARP_FALLBACK_STATE" ] && [ "$(warp_fallback_mode)" = "direct" ]; then
         printf '  默认出站  %s（WARP 全断直连兜底中）\n' "$_warp_default"
     else
@@ -3100,7 +3104,7 @@ warp_enable_clash_api() {
 
 warp_build_restore_config() {
     _warp_tmp="$1"
-    _warp_previous=$(cat "$WARP_ROUTE_BACKUP" 2>/dev/null || printf 'direct')
+    _warp_previous=$(warp_fallback_target)
     jq --arg previous "$_warp_previous" '
         .outbounds = ((.outbounds // []) | map(select(
             (.tag // "") != "sbox-warp-auto" and
@@ -3110,6 +3114,10 @@ warp_build_restore_config() {
         )))
         | if .route.final == "sbox-warp-auto" then .route.final = $previous else . end
     ' "$CONF_FILE" > "$_warp_tmp"
+}
+
+warp_is_paused() {
+    [ -f "$WARP_PAUSE_FLAG" ]
 }
 
 warp_fallback_target() {
@@ -3483,6 +3491,7 @@ warp_install_body() {
         fi
         return 1
     fi
+    rm -f "$WARP_PAUSE_FLAG"
     warp_write_fallback_state "warp" 0 0 0 || true
     info "✅ 三路内核态 WARP 已接入 sing-box，节点流量现由 URLTest 自动择优"
     warn "旧 warp 接口及其系统策略路由保持原样，可在验证新出口后再单独退役。"
@@ -3608,7 +3617,7 @@ warp_repair_once() (
         _warp_slot=$((_warp_slot + 1))
     done
 
-    if [ "$WARP_FALLBACK_DIRECT" = "1" ]; then
+    if [ "$WARP_FALLBACK_DIRECT" = "1" ] && ! warp_is_paused; then
         if [ "$_warp_mode" = "warp" ]; then
             if [ "$_warp_s1_ok" = "0" ] && [ "$_warp_s2_ok" = "0" ] && [ "$_warp_s3_ok" = "0" ]; then
                 _warp_target=$(warp_fallback_target)
@@ -3649,7 +3658,7 @@ warp_daemon() {
     warp_log "启动三路 WARP 保活巡检，周期 ${WARP_INTERVAL} 秒"
     while :; do
         sleep "$WARP_INTERVAL"
-        warp_repair_once || true
+        warp_is_paused || warp_repair_once || true
     done
 }
 
@@ -3714,7 +3723,7 @@ warp_disable_body() {
         return 1
     fi
     warp_cleanup_interfaces
-    rm -f "$WARP_ROUTE_BACKUP" "$WARP_FALLBACK_STATE"
+    rm -f "$WARP_ROUTE_BACKUP" "$WARP_FALLBACK_STATE" "$WARP_PAUSE_FLAG"
     info "✅ 已将 sing-box 路由恢复到启用 WARP 前的出站，并移除 sboxwg1/2/3"
     warn "旧 warp 接口和系统策略路由未更改。"
 }
@@ -3740,6 +3749,85 @@ warp_disable() (
     trap 'warp_unlock; exit 1' HUP INT TERM
     warp_disable_body
 )
+
+warp_pause_body() {
+    if [ ! -f "$WARP_FILE" ] || ! jq -e '.outbounds[]? | select(.tag == "sbox-warp-auto")' "$CONF_FILE" >/dev/null 2>&1; then
+        err "❌ 尚未安装或启用三路 WARP"
+        return 1
+    fi
+    _warp_cur_final=$(jq -r '.route.final // "direct"' "$CONF_FILE" 2>/dev/null || printf 'direct')
+    if warp_is_paused && [ "$_warp_cur_final" != "sbox-warp-auto" ]; then
+        info "ℹ️ WARP 当前已处于临时暂停状态（当前出站: $_warp_cur_final）"
+        return 0
+    fi
+    if [ ! -f "$WARP_ROUTE_BACKUP" ]; then
+        mkdir -p "$WARP_DIR" || return 1
+        chmod 700 "$WARP_DIR" 2>/dev/null || true
+        if [ "$_warp_cur_final" != "sbox-warp-auto" ] && [ -n "$_warp_cur_final" ]; then
+            printf '%s\n' "$_warp_cur_final" > "$WARP_ROUTE_BACKUP" || return 1
+        else
+            printf 'direct\n' > "$WARP_ROUTE_BACKUP" || return 1
+        fi
+        chmod 600 "$WARP_ROUTE_BACKUP" 2>/dev/null || true
+    fi
+    _warp_target=$(warp_fallback_target)
+    if [ "$_warp_cur_final" != "$_warp_target" ]; then
+        if ! warp_switch_route_final "$_warp_target"; then
+            err "❌ 切换出站至 $_warp_target 失败，未暂停 WARP"
+            return 1
+        fi
+    fi
+    mkdir -p "$WARP_DIR" || return 1
+    chmod 700 "$WARP_DIR" 2>/dev/null || true
+    date '+%Y-%m-%d %H:%M:%S' > "$WARP_PAUSE_FLAG" || return 1
+    chmod 600 "$WARP_PAUSE_FLAG" 2>/dev/null || true
+    warp_log "已临时暂停 WARP，默认出站切换为 ${_warp_target}"
+    info "✅ 已临时暂停 WARP（当前出站: ${_warp_target}），sboxwg1/2/3 接口与配置已保留，可随时一键恢复"
+}
+
+warp_pause() (
+    warp_lock || exit 1
+    trap 'warp_unlock' EXIT
+    trap 'warp_unlock; exit 1' HUP INT TERM
+    warp_pause_body
+)
+
+warp_resume_body() {
+    if [ ! -f "$WARP_FILE" ] || ! jq -e '.outbounds[]? | select(.tag == "sbox-warp-auto")' "$CONF_FILE" >/dev/null 2>&1; then
+        err "❌ 未检测到 sbox-warp-auto 出站，请先安装 / 启用三路 WARP"
+        return 1
+    fi
+    _warp_cur_final=$(jq -r '.route.final // "direct"' "$CONF_FILE" 2>/dev/null || printf 'direct')
+    if ! warp_is_paused && [ "$_warp_cur_final" = "sbox-warp-auto" ]; then
+        info "ℹ️ WARP 当前已处于启用状态"
+        return 0
+    fi
+    if [ "$_warp_cur_final" != "sbox-warp-auto" ]; then
+        if ! warp_switch_route_final "sbox-warp-auto"; then
+            err "❌ 切回 sbox-warp-auto 失败，WARP 保持暂停状态"
+            return 1
+        fi
+    fi
+    rm -f "$WARP_PAUSE_FLAG"
+    warp_write_fallback_state "warp" 0 0 0 || true
+    warp_log "已恢复 WARP 自动出站 (route.final=sbox-warp-auto)"
+    info "✅ 已恢复三路 WARP 自动出站 (sbox-warp-auto)"
+}
+
+warp_resume() (
+    warp_lock || exit 1
+    trap 'warp_unlock' EXIT
+    trap 'warp_unlock; exit 1' HUP INT TERM
+    warp_resume_body
+)
+
+warp_toggle_pause() {
+    if warp_is_paused; then
+        warp_resume
+    else
+        warp_pause
+    fi
+}
 
 warp_refresh_slot_ip() {
     _warp_slot="$1"
@@ -3876,18 +3964,31 @@ run_warp_setup() {
     menu_option 2 "查看通道状态与出口 IP"
     menu_option 3 "立即执行一次保活修复"
     menu_option 4 "刷新指定通道出口 IP"
-    menu_option 5 "停用自动出站并移除管理接口"
+    if warp_is_paused; then
+        menu_option 5 "恢复 WARP（切回自动优选）"
+    else
+        menu_option 5 "暂停 WARP（临时切回直连，保留接口）"
+    fi
+    menu_option 6 "停用自动出站并移除管理接口"
     menu_option 0 "返回"
-    ask "请选择 [0-5]: "
-    case "$REPLY" in
-        1) run_warp_install_flow ;;
-        2) warp_status ;;
-        3) warp_repair_once ;;
-        4) warp_refresh_ips ;;
-        5)
-            confirm "将恢复 sing-box 原有出站并删除 sboxwg1/2/3。继续？" && warp_disable
+    ask "请选择 [0-6]: "
+    _warp_choice=$(printf '%s' "$REPLY" | tr -d ' \t\r')
+    case "$_warp_choice" in
+        1) run_warp_install_flow; pause ;;
+        2) warp_status; pause ;;
+        3) warp_repair_once; pause ;;
+        4) warp_refresh_ips; pause ;;
+        5) warp_toggle_pause; pause ;;
+        6)
+            if confirm "将恢复 sing-box 原有出站并删除 sboxwg1/2/3。继续？"; then
+                warp_disable
+            else
+                info "已取消停用操作"
+            fi
+            pause
             ;;
-        *) return 0 ;;
+        0|q|Q) return 0 ;;
+        *) warn "无效输入: $_warp_choice"; pause ;;
     esac
 }
 
@@ -3899,6 +4000,8 @@ warp_command() {
         status) warp_status ;;
         repair) warp_repair_once ;;
         refresh) shift; warp_refresh_ips "$@" ;;
+        pause) warp_pause ;;
+        resume) warp_resume ;;
         api) warp_enable_clash_api ;;
         disable)
             confirm "将恢复 sing-box 原有出站并删除 sboxwg1/2/3。继续？" && warp_disable
@@ -3906,7 +4009,7 @@ warp_command() {
         daemon) warp_daemon ;;
         log) tail -n 100 "$WARP_LOG" 2>/dev/null || warn "暂无 WARP 保活日志" ;;
         *)
-            err "用法: sbox warp [menu|install|status|repair|refresh|api|disable|daemon|log]"
+            err "用法: sbox warp [menu|install|status|repair|refresh|pause|resume|api|disable|daemon|log]"
             return 2
             ;;
     esac
@@ -3916,40 +4019,40 @@ warp_command() {
 write_embedded_origin_age() {
     cat <<'__EMBEDDED_ORIGIN_AGE_EOF__' > "$1"
 -----BEGIN AGE ENCRYPTED FILE-----
-YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBrZEdhWTRMMUJvTVRYS1Mv
-RXUvMHdRIDE0Cnh5Q1ZtVlhCR2Y1eUh4WFo0eitTQndQd2Y1a0NYTS9vNk1pbHNk
-Ny9VOGcKLS0tIFA5bFNuQmlMdDNBNW5pMG9iU2ZNWno1QlhhbllLRUYwWlY1LzFW
-WWRzOXcKylmQGa60froUUDbWeKrFPD5m1dBk/SeXEjWnek/egbHnmiVKfYfk5xAS
-KPNt5lbuBCSSx6f9hjfyaQjyIT342PIuXHcCmvOrt+VRQpQbRlQT1TZ8M3JzQ/XF
-i6WJo5fUzp3a//cOaQ/RB6I9B3fkUYPocoPXw1sL6M6gnO3qems1f2WkjceL/ssJ
-NWgt/n7UfjHHcvmi7kmROZjgjW/Lods4Mzp/QUDcwlJXopx8lgVke2M72qs+upmM
-xv7WzMIyRxueCnsyKrm2dEcBHHHagYi1BkfWhACrnfZabD3iQ2Uxvciy/l3v88d5
-xoUvufxP7/N3yuP/UdHGYvituNqkC0ErV5pZD2vYMDt0PQEIg1IH3C9o7MQD2Rsp
-aip7GUJLw3hpJmnewbyvw6+gFHhve9UE2xAvpgojWeODNrP2WbqgYfcvKVaUHiex
-QAM6yzfwanDoALtUQuIBRoJO+s4jmvc6bzNUF3d9exOAzwMZdS0psRkmW556CCF1
-5MKLo3ZQ6UWNcy7rJvA2mIZzWjcS2lNaIUFfIkurfAMOvcswwi26I/C0WAujyNVD
-52PqKvVL7+Kcc7XscBWieZC+r8+aUo7ajqrmUqYC99yGuBiEL6OK4pnpjUuGxlYg
-FmzvqZ16jDSupDR9jACTVUaluZyHG/yYqEmj4IglclsQKpxsLhJ84Fusb+YsGyWl
-A+ho7UGwt6VH1OWZJ5kIEBUeMtNML9LEU4fxJXp2QPU05VRrd5p0034vUSBOLnWG
-jIDAxFIFE5hIzFvKHfY1iUoRdYRPknYJAKwbfNIdFbQfKknfdFqlgiplJ3tzlO1v
-sjeIfz1RZ7x+2ew8TInhopbPrF4iF43/KsCRAlnIRUyQSwHB/yfkYRnAGwMnFwp3
-WyGW8AJ1wtFrsYbkND5Y2j/cXw8VULFZPoEAjzJw3e0XbvXgDk7zgV/TZX8PRCzC
-XyNYeXixaJ+4mzJwEQEZ4XEwq02Tu9grqtR0vzk69hAPbwW8xOlicmVP+hX8gM80
-PMtVwzbTqaywhVojgPK4bf4B5QU+7Uoq8bCh+Ks4MKf6+B5MTazqU0CQDez9lUic
-aM/KXE5zQIUzZOF9tWMijhZI/fLSlsKesrCCIQeFQkd2uQasWNH2ZWOqnw5esugc
-tv13r0+0ZEvO1cXkXzBP97fXHbUeIscl3guyAcqRaSgj4jcrgkYoqqX4Goe9wbLa
-WTA/ieTYQbpsUxdItSZ20/uaCVTJaMSYu3NwIaLPMF8Tg8stpGZb0ZGmgLaJwZAr
-QLEWX0JQfBUw66jyDdhjd0T+5pvO8m1EqklEWz1mwGlXBQMtV7jItpZp4E9UrBAm
-6CiFsL87vyG8WeKZ2RvQ0LkLAtafhbjMu56pnp9leTEkA2RAXbRFvJxxD4jzojry
-ub+TjUfsNGyxM2G+OgL5TqjdnC/CiMcB9i+np8D0BW1eGkWz9brz92GU9gtbKF6d
-4qEmmpC84V4p9o8GgQFida212uCD6I1XRBewGwBvi3K8Longl/OAw10qbgdoVS7D
-eXSXrXeBIgIvkOZh5SdyN5XfGf87x+lNGwVXIpWTlQ5YY/1+HdSpDr4iJtitr1l5
-8OX3dpZSCurK8PYY5sEoQKnFKq0O1adukwfWmf7hpQum/fZS5ILRtg4J2R2KEzf2
-SWysN3SYSZr02ePGyuXv22Rkdm4LpfPmw1fujqY6h9SEL5u6X3DoH56UrXrqC3Kn
-rrCPlAWAuF9Gp/UJjl/5mCZdujacGDMVtHBXLpNMgl0Uyp1SDROOPARN9GSLwOYR
-xbA/eM9qw1EEf8ayVgzMcteg/hAvmLnw6rxoM5SfTlCi9wGtcXRzaVvCPtreTNgj
-76LHEL8YmlvI6/mahSKFoDJaFi2K1TfJ2btuOeULSLHpTFvXBQGKSQjFK/W4wlzv
-junemtauctxitvXz9hyNEJgM812z
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBwZHgzd1VHK2puZ3FXY3VE
+K3pLTGx3IDE0CklzTHNaL1BHVWorL25ZYjA4SS9nbm1YZTdLemtHY0ZGQkpocHkw
+cVg5NWMKLS0tIGdZd1dtY3hEUzJvcVBuNzRWdUNvQ1AzaHpmVXp6aWlUUnZUbldx
+eTNLUUEK3illwbLVHq+FPnQHycPFjr1USywBQRg5RCddaesEk+6pqBFbXgjIE2jM
+ZArWc0R+sOf/Hg3Xx+nL0h5P/qCHC7nVStQj9rpluVfAOY4n248OAJ9TBJR971c1
+/bKezLtLtYm3eg8Ntcm3GBghhb6LvlJfM39lfRErql98SwpKjWXg+HeH8y0uict+
+0Laf1sKqyOPVUtD+IhBNZK5do3z69uaAFo0rkVGs+Hz2KmNO3X1HxXDFxuGA2Nd0
+mfol4Fa/GYQ//0gpFT+1hAY4UrOw8A2DofSE9dUJFtc0Kh5w4BDu0L/nReaz+U4j
+Cxos4O50bjZbAGo+Rtxx6QjkaOG+moBiojJYWOkTMZ72+1g4PWrVBAwdajxJIIEa
+ODApQIp8RH4FnjWMafzClsi3vC9SVY2WYUdIMjN0m42RNUAeaCsYGRtRjWQpmGoy
+wLH9Dfpgx/ivKx3qLimAMLDUoS1crM7gBQp7qTlDGK9MqMueBJhUsQNtOLcaFbA4
+jLZmXF/2CUgGozzlk+tYq9b3eu7KAZwwt04S6wFGEhF+bETX8DIYX/tQyt6BePmN
+lMhkGo1oDSUkBC01z9KXj291R94aXBm6WffUxBtuXuK+1tDF5HgXvpnrJb28F9QS
+Y4O1+clbI8MESTHj4HsfqvCIcuLu1zzMBfPih0H6pN7wkl2O2HhnlPmrjOAhj/9S
+AAFczDNyKUt3fajUNNjdWgnCep5PJGW/Boye4qgka+IAOGD5xaXNhlrYJbvYZr7b
+prjNQJDN56JCqp/6gOwRuvWBo45kGavt14YvXG4C+wH9KSktlJ/ctmvYa1SJfERN
+E8iYIkacTNogLVpF2MeEpH+gd4HyKTx+ILzX41Hw3FkGrB2lmWmR/O+9v/3VU9lb
+lLBHiEJXbrFTdG3P+NWJ8f/YE3NCZSHi/reM5LVlxGuiWBKrope75kwq1dzuWxwL
+MC7OPMoV4KL1DplJqKNTTgy7TwKLwO7LuvMEin2utvjQgyF9DogkaajPXuUts9xb
+Edm30+oh3q8frP7nLAT2re25IuI0MIRjDyPAokbvanF63wBwKXRbG5+smDL8fEkz
+RbWknG7VzEXhHhRZ3r+Fn3xzli45y1pOQ4V6hREUg9dDQdu70dPbIyPMPrcIu3EO
+Fakd3EHxtsEeGLYE7C69cfwS8OEoVrIsNVXp70E2CnNAmZcGKTplVZfIyUwqV+m7
+P/HPiwgY0FFPxqcYx/MzSLJ5uHjkixt/H8dsNMfbCeYpn3sVHJfPHO2JsDKHZSbO
+au92kVtSXYzqkBAQ/nI763Kiw9deNVcbzr8knJSBvK0bgxM0NPFcUh0ysIxjYSUX
+IlsBaJeQ4BdHLod2ff0IXyAoZFZcZswPM170fEDeYFv5Ws1NxL25yYlZr6Q5Prab
+URA4UAmp31Tlyvx52WSs6gozdsDO1zrL/oeWmCEjAd3I3viacB/6M/ERO6tHpjLg
+RzbAk1qa8n4ClM6Ek2g/79YTkSE/aGQbuQ+uQv78JKqsCP5yil/SyxAkLlMr+ti0
+Q6rx0UxXRdnAj02hRhPld6jQ2p6H1wxmw/pfh5MhL9jpwq2DMOcVrU1GWYKNP3R0
+pSuWD4RxguiGWyTK6yucxhaS74Ay5Y8CO7U1VWXbTSVgla9ehmzH9i3ku8nnnr6g
+KsfWlpIhvlFGG4JdC1SLqCcFxKM69F/7aemDzDcco6ManAC1laXuA9YylY3SlNVD
+Kmsg71gOcv1q5WWZ70tgDb/31YYfbHBoSEDHJo/Kkp3r6EOsOhXO+aCfqK7DQk/Y
+NTXYwbEGfHG3x94t+QkoYHoKqu7GrbIb+meema6LSZdi7zwm6hXtUi/4CH+F7FyK
+Nfbk0RDGEZoIJQJkmHSLp3ktGvyuhQOHbwY/UKeliuz31QwRUPN39uHHMHqxezcA
+W/X7nHOMZdrjxGVeaSZnBszaRQxd
 -----END AGE ENCRYPTED FILE-----
 __EMBEDDED_ORIGIN_AGE_EOF__
 }
@@ -4052,7 +4155,7 @@ update_self() {
 }
 
 show_header() {
-    [ -n "$JSON_ENGINE" ] || detect_json_engine >/dev/null 2>&1 || true
+    [ -n "$JSON_ENGINE" ] || detect_json_tool >/dev/null 2>&1 || true
     load_strategy
     PID=$(core_pid || true)
     if [ -n "$PID" ]; then
@@ -4110,7 +4213,7 @@ main_menu() {
             7) menu_service ;;
             8) update_core; pause ;;
             9) repair_autostart; pause ;;
-            10) run_warp_setup; warp_invalidate_exit_ip_cache; pause ;;
+            10) run_warp_setup; warp_invalidate_exit_ip_cache ;;
             11) cf_speedtest; pause ;;
             12) detect_ip; warp_invalidate_exit_ip_cache ;;
             13) uninstall_all && exit 0; pause ;;
