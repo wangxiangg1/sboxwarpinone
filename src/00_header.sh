@@ -3,7 +3,7 @@
 # ==============================================================================
 # 脚本名称: sbox.sh  (Alpine / Debian / Ubuntu 通用轻量 sing-box 多入站安装 + 管理脚本)
 # 仓库项目: sboxwarpinone (全合一单文件版，支持内核态 WARP 多出口容灾与 age 加密内置 Origin TLS 证书)
-# 版本    : 1.1.7
+# 版本    : 1.1.8
 # 核心特性:
 #   - 多入站管理：同实例原生支持 Hysteria2 / VLESS+WS (CF CDN) / VLESS+Reality 共存
 #   - 新版无警告配置：完全对齐 sing-box 1.12+ / 1.14+ DNS 与 default_domain_resolver 语法
@@ -39,7 +39,7 @@ CERT_DIR="/etc/sing-box/certs"
 KEY_MAP="/etc/sing-box/reality_keys.json"
 NODE_ENV="/etc/sing-box/node.env"
 LOG_FILE="/var/log/sing-box.log"
-SCRIPT_VERSION="1.1.7"
+SCRIPT_VERSION="1.1.8"
 GH_PROXY="${GH_PROXY:-}"
 
 # 透明转发：以 sbox 名义被调用且带非保留参数时，直接交给官方 sing-box 核心

@@ -95,7 +95,7 @@ update_self() {
 }
 
 show_header() {
-    [ -n "$JSON_ENGINE" ] || detect_json_engine >/dev/null 2>&1 || true
+    [ -n "$JSON_ENGINE" ] || detect_json_tool >/dev/null 2>&1 || true
     load_strategy
     PID=$(core_pid || true)
     if [ -n "$PID" ]; then
@@ -153,7 +153,7 @@ main_menu() {
             7) menu_service ;;
             8) update_core; pause ;;
             9) repair_autostart; pause ;;
-            10) run_warp_setup; warp_invalidate_exit_ip_cache; pause ;;
+            10) run_warp_setup; warp_invalidate_exit_ip_cache ;;
             11) cf_speedtest; pause ;;
             12) detect_ip; warp_invalidate_exit_ip_cache ;;
             13) uninstall_all && exit 0; pause ;;

@@ -32,6 +32,7 @@ pause() { printf "\n%b按回车返回菜单...%b" "$C_B" "$C_N"; read -r _ || ex
 ask() {
     printf "%b›%b %s" "$C_G" "$C_N" "$1"
     read -r REPLY || exit 0
+    REPLY=$(printf '%s' "$REPLY" | tr -d '\r')
 }
 
 confirm() {

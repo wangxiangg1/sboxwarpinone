@@ -6,6 +6,7 @@ WARP_DIR="${CONF_DIR}/warp"
 WARP_FILE="${WARP_DIR}/accounts.json"
 WARP_ROUTE_BACKUP="${WARP_DIR}/route-final.before-warp"
 WARP_FALLBACK_STATE="${WARP_DIR}/fallback.state"
+WARP_PAUSE_FLAG="${WARP_DIR}/paused"
 WARP_FALLBACK_DIRECT="${WARP_FALLBACK_DIRECT:-1}"
 WARP_LOG="/var/log/sbox-warp.log"
 WARP_LOCK_DIR="${WARP_DIR}/.lock"
@@ -511,6 +512,8 @@ warp_show_channel_summary() {
         else
             printf '  当前胜出  未开启本机控制口（执行 sbox warp api 开启后实时显示）\n'
         fi
+    elif warp_is_paused; then
+        printf '  默认出站  %s（WARP 已临时暂停，选恢复可一键切回）\n' "$_warp_default"
     elif [ -f "$WARP_FALLBACK_STATE" ] && [ "$(warp_fallback_mode)" = "direct" ]; then
         printf '  默认出站  %s（WARP 全断直连兜底中）\n' "$_warp_default"
     else
@@ -719,7 +722,7 @@ warp_enable_clash_api() {
 
 warp_build_restore_config() {
     _warp_tmp="$1"
-    _warp_previous=$(cat "$WARP_ROUTE_BACKUP" 2>/dev/null || printf 'direct')
+    _warp_previous=$(warp_fallback_target)
     jq --arg previous "$_warp_previous" '
         .outbounds = ((.outbounds // []) | map(select(
             (.tag // "") != "sbox-warp-auto" and
@@ -729,6 +732,10 @@ warp_build_restore_config() {
         )))
         | if .route.final == "sbox-warp-auto" then .route.final = $previous else . end
     ' "$CONF_FILE" > "$_warp_tmp"
+}
+
+warp_is_paused() {
+    [ -f "$WARP_PAUSE_FLAG" ]
 }
 
 warp_fallback_target() {
@@ -1102,6 +1109,7 @@ warp_install_body() {
         fi
         return 1
     fi
+    rm -f "$WARP_PAUSE_FLAG"
     warp_write_fallback_state "warp" 0 0 0 || true
     info "✅ 三路内核态 WARP 已接入 sing-box，节点流量现由 URLTest 自动择优"
     warn "旧 warp 接口及其系统策略路由保持原样，可在验证新出口后再单独退役。"
@@ -1227,7 +1235,7 @@ warp_repair_once() (
         _warp_slot=$((_warp_slot + 1))
     done
 
-    if [ "$WARP_FALLBACK_DIRECT" = "1" ]; then
+    if [ "$WARP_FALLBACK_DIRECT" = "1" ] && ! warp_is_paused; then
         if [ "$_warp_mode" = "warp" ]; then
             if [ "$_warp_s1_ok" = "0" ] && [ "$_warp_s2_ok" = "0" ] && [ "$_warp_s3_ok" = "0" ]; then
                 _warp_target=$(warp_fallback_target)
@@ -1268,7 +1276,7 @@ warp_daemon() {
     warp_log "启动三路 WARP 保活巡检，周期 ${WARP_INTERVAL} 秒"
     while :; do
         sleep "$WARP_INTERVAL"
-        warp_repair_once || true
+        warp_is_paused || warp_repair_once || true
     done
 }
 
@@ -1333,7 +1341,7 @@ warp_disable_body() {
         return 1
     fi
     warp_cleanup_interfaces
-    rm -f "$WARP_ROUTE_BACKUP" "$WARP_FALLBACK_STATE"
+    rm -f "$WARP_ROUTE_BACKUP" "$WARP_FALLBACK_STATE" "$WARP_PAUSE_FLAG"
     info "✅ 已将 sing-box 路由恢复到启用 WARP 前的出站，并移除 sboxwg1/2/3"
     warn "旧 warp 接口和系统策略路由未更改。"
 }
@@ -1359,6 +1367,85 @@ warp_disable() (
     trap 'warp_unlock; exit 1' HUP INT TERM
     warp_disable_body
 )
+
+warp_pause_body() {
+    if [ ! -f "$WARP_FILE" ] || ! jq -e '.outbounds[]? | select(.tag == "sbox-warp-auto")' "$CONF_FILE" >/dev/null 2>&1; then
+        err "❌ 尚未安装或启用三路 WARP"
+        return 1
+    fi
+    _warp_cur_final=$(jq -r '.route.final // "direct"' "$CONF_FILE" 2>/dev/null || printf 'direct')
+    if warp_is_paused && [ "$_warp_cur_final" != "sbox-warp-auto" ]; then
+        info "ℹ️ WARP 当前已处于临时暂停状态（当前出站: $_warp_cur_final）"
+        return 0
+    fi
+    if [ ! -f "$WARP_ROUTE_BACKUP" ]; then
+        mkdir -p "$WARP_DIR" || return 1
+        chmod 700 "$WARP_DIR" 2>/dev/null || true
+        if [ "$_warp_cur_final" != "sbox-warp-auto" ] && [ -n "$_warp_cur_final" ]; then
+            printf '%s\n' "$_warp_cur_final" > "$WARP_ROUTE_BACKUP" || return 1
+        else
+            printf 'direct\n' > "$WARP_ROUTE_BACKUP" || return 1
+        fi
+        chmod 600 "$WARP_ROUTE_BACKUP" 2>/dev/null || true
+    fi
+    _warp_target=$(warp_fallback_target)
+    if [ "$_warp_cur_final" != "$_warp_target" ]; then
+        if ! warp_switch_route_final "$_warp_target"; then
+            err "❌ 切换出站至 $_warp_target 失败，未暂停 WARP"
+            return 1
+        fi
+    fi
+    mkdir -p "$WARP_DIR" || return 1
+    chmod 700 "$WARP_DIR" 2>/dev/null || true
+    date '+%Y-%m-%d %H:%M:%S' > "$WARP_PAUSE_FLAG" || return 1
+    chmod 600 "$WARP_PAUSE_FLAG" 2>/dev/null || true
+    warp_log "已临时暂停 WARP，默认出站切换为 ${_warp_target}"
+    info "✅ 已临时暂停 WARP（当前出站: ${_warp_target}），sboxwg1/2/3 接口与配置已保留，可随时一键恢复"
+}
+
+warp_pause() (
+    warp_lock || exit 1
+    trap 'warp_unlock' EXIT
+    trap 'warp_unlock; exit 1' HUP INT TERM
+    warp_pause_body
+)
+
+warp_resume_body() {
+    if [ ! -f "$WARP_FILE" ] || ! jq -e '.outbounds[]? | select(.tag == "sbox-warp-auto")' "$CONF_FILE" >/dev/null 2>&1; then
+        err "❌ 未检测到 sbox-warp-auto 出站，请先安装 / 启用三路 WARP"
+        return 1
+    fi
+    _warp_cur_final=$(jq -r '.route.final // "direct"' "$CONF_FILE" 2>/dev/null || printf 'direct')
+    if ! warp_is_paused && [ "$_warp_cur_final" = "sbox-warp-auto" ]; then
+        info "ℹ️ WARP 当前已处于启用状态"
+        return 0
+    fi
+    if [ "$_warp_cur_final" != "sbox-warp-auto" ]; then
+        if ! warp_switch_route_final "sbox-warp-auto"; then
+            err "❌ 切回 sbox-warp-auto 失败，WARP 保持暂停状态"
+            return 1
+        fi
+    fi
+    rm -f "$WARP_PAUSE_FLAG"
+    warp_write_fallback_state "warp" 0 0 0 || true
+    warp_log "已恢复 WARP 自动出站 (route.final=sbox-warp-auto)"
+    info "✅ 已恢复三路 WARP 自动出站 (sbox-warp-auto)"
+}
+
+warp_resume() (
+    warp_lock || exit 1
+    trap 'warp_unlock' EXIT
+    trap 'warp_unlock; exit 1' HUP INT TERM
+    warp_resume_body
+)
+
+warp_toggle_pause() {
+    if warp_is_paused; then
+        warp_resume
+    else
+        warp_pause
+    fi
+}
 
 warp_refresh_slot_ip() {
     _warp_slot="$1"
@@ -1495,18 +1582,31 @@ run_warp_setup() {
     menu_option 2 "查看通道状态与出口 IP"
     menu_option 3 "立即执行一次保活修复"
     menu_option 4 "刷新指定通道出口 IP"
-    menu_option 5 "停用自动出站并移除管理接口"
+    if warp_is_paused; then
+        menu_option 5 "恢复 WARP（切回自动优选）"
+    else
+        menu_option 5 "暂停 WARP（临时切回直连，保留接口）"
+    fi
+    menu_option 6 "停用自动出站并移除管理接口"
     menu_option 0 "返回"
-    ask "请选择 [0-5]: "
-    case "$REPLY" in
-        1) run_warp_install_flow ;;
-        2) warp_status ;;
-        3) warp_repair_once ;;
-        4) warp_refresh_ips ;;
-        5)
-            confirm "将恢复 sing-box 原有出站并删除 sboxwg1/2/3。继续？" && warp_disable
+    ask "请选择 [0-6]: "
+    _warp_choice=$(printf '%s' "$REPLY" | tr -d ' \t\r')
+    case "$_warp_choice" in
+        1) run_warp_install_flow; pause ;;
+        2) warp_status; pause ;;
+        3) warp_repair_once; pause ;;
+        4) warp_refresh_ips; pause ;;
+        5) warp_toggle_pause; pause ;;
+        6)
+            if confirm "将恢复 sing-box 原有出站并删除 sboxwg1/2/3。继续？"; then
+                warp_disable
+            else
+                info "已取消停用操作"
+            fi
+            pause
             ;;
-        *) return 0 ;;
+        0|q|Q) return 0 ;;
+        *) warn "无效输入: $_warp_choice"; pause ;;
     esac
 }
 
@@ -1518,6 +1618,8 @@ warp_command() {
         status) warp_status ;;
         repair) warp_repair_once ;;
         refresh) shift; warp_refresh_ips "$@" ;;
+        pause) warp_pause ;;
+        resume) warp_resume ;;
         api) warp_enable_clash_api ;;
         disable)
             confirm "将恢复 sing-box 原有出站并删除 sboxwg1/2/3。继续？" && warp_disable
@@ -1525,7 +1627,7 @@ warp_command() {
         daemon) warp_daemon ;;
         log) tail -n 100 "$WARP_LOG" 2>/dev/null || warn "暂无 WARP 保活日志" ;;
         *)
-            err "用法: sbox warp [menu|install|status|repair|refresh|api|disable|daemon|log]"
+            err "用法: sbox warp [menu|install|status|repair|refresh|pause|resume|api|disable|daemon|log]"
             return 2
             ;;
     esac
