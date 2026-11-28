@@ -51,7 +51,8 @@ uninstall_all() {
     case "$INIT" in
         systemd)
             systemctl disable --now sbox-warp-keepalive.service >/dev/null 2>&1 || true
-            rm -f /etc/systemd/system/sbox-warp-keepalive.service
+            systemctl disable --now sbox-usque.service sbox-usque-backup.service >/dev/null 2>&1 || true
+            rm -f /etc/systemd/system/sbox-warp-keepalive.service /etc/systemd/system/sbox-usque.service /etc/systemd/system/sbox-usque-backup.service
             rm -f /etc/systemd/system/sing-box.service.d/10-sbox-warp.conf
             rmdir /etc/systemd/system/sing-box.service.d 2>/dev/null || true
             systemctl disable sing-box >/dev/null 2>&1 || true
@@ -61,7 +62,9 @@ uninstall_all() {
         openrc)
             rc-update del sing-box default >/dev/null 2>&1 || true
             rc-update del sbox-warp-keepalive default >/dev/null 2>&1 || true
-            rm -f /etc/init.d/sing-box /etc/local.d/sing-box.start /etc/init.d/sbox-warp-keepalive
+            rc-update del sbox-usque default >/dev/null 2>&1 || true
+            rc-update del sbox-usque-backup default >/dev/null 2>&1 || true
+            rm -f /etc/init.d/sing-box /etc/local.d/sing-box.start /etc/init.d/sbox-warp-keepalive /etc/init.d/sbox-usque /etc/init.d/sbox-usque-backup
             ;;
         *)
             pkill -x sing-box 2>/dev/null || killall sing-box 2>/dev/null || true
@@ -134,7 +137,7 @@ main_menu() {
         menu_option 8 "更新 sing-box 核心"
         menu_option 9 "检查 / 修复开机自启"
         menu_section "网络与出口"
-        menu_option 10 "管理三路内核态 WARP"
+        menu_option 10 "管理 WARP 出口（WireGuard / MASQUE 双模）"
         menu_option 11 "Cloudflare 测速"
         menu_option 12 "重新探测主机 IP"
         menu_section "系统"

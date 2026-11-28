@@ -489,6 +489,13 @@ warp_query_active_lane() {
 }
 
 warp_show_channel_summary() {
+    if command -v warp_load_mode_env >/dev/null 2>&1; then
+        warp_load_mode_env
+        if [ "$WARP_MODE" = "masque" ] && command -v masque_show_channel_summary >/dev/null 2>&1; then
+            masque_show_channel_summary
+            return 0
+        fi
+    fi
     _warp_now=$(date +%s)
     case "$WARP_EXIT_IP_CACHE_AT" in
         ''|*[!0-9]*) WARP_EXIT_IP_CACHE_AT=0 ;;
@@ -1056,6 +1063,13 @@ warp_verify_install_slot() {
 }
 
 warp_install_body() {
+    if command -v masque_remove_services >/dev/null 2>&1; then
+        masque_remove_services >/dev/null 2>&1 || true
+    fi
+    if command -v warp_save_mode_env >/dev/null 2>&1; then
+        WARP_MODE="wg"
+        warp_save_mode_env || true
+    fi
     ensure_warp_deps || return 1
     warp_prepare_store || { err "❌ WARP 账号数据不可用"; return 1; }
     warp_ensure_accounts || return 1
@@ -1084,6 +1098,8 @@ warp_install_body() {
             rm -f "$_warp_tmp"
             warp_cleanup_interfaces
             err "❌ $_warp_install_iface 尚未通过 WARP 出口验证，已清理本次创建的接口与路由，sing-box 路由保持原样"
+            warn "💡 若全部端点均 0 B received 握手失败，可能是宿主机屏蔽了 WireGuard UDP；"
+            warn "   建议在 [10] WARP 管理菜单切换为「WARP MASQUE (usque)」模式（全 UDP 被封可选 --http2 或双路热备）。"
             return 1
         fi
         _warp_install_slot=$((_warp_install_slot + 1))
@@ -1347,6 +1363,9 @@ warp_disable_body() {
 }
 
 warp_remove_managed_resources() {
+    if command -v masque_remove_services >/dev/null 2>&1; then
+        masque_remove_services >/dev/null 2>&1 || true
+    fi
     if [ ! -f "$WARP_FILE" ] && [ ! -f "$WARP_ROUTE_BACKUP" ] &&
         [ ! -f /etc/systemd/system/sbox-warp-keepalive.service ] &&
         [ ! -f /etc/init.d/sbox-warp-keepalive ]; then
@@ -1576,9 +1595,58 @@ run_warp_setup() {
         warp_install
         return $?
     fi
-    menu_title "内核态 WARP"
+    command -v warp_load_mode_env >/dev/null 2>&1 && warp_load_mode_env
+
+    if [ "$WARP_MODE" = "masque" ]; then
+        menu_title "WARP 管理中心 · 当前模式：MASQUE (usque)"
+        warp_show_channel_summary
+        echo "  注：dual 主路与 l4-socks 仅转发 TCP；需转发 UDP 时请选单路 socks。"
+        menu_option 1 "安装 / 切换 MASQUE 子模式（双路热备默认 / 单路可选）"
+        menu_option 2 "查看 MASQUE 状态与双栈出口 IP"
+        menu_option 3 "重新注册 MASQUE 账号（带失败回滚保护）"
+        if warp_is_paused; then
+            menu_option 4 "恢复 MASQUE（启动 usque 并切回自动优选）"
+        else
+            menu_option 4 "暂停 MASQUE（停用 usque 切回直连，保留账号）"
+        fi
+        menu_option 5 "彻底卸载 MASQUE（先安全切回直连再清理）"
+        menu_option 6 "切换回「三路内核态 WireGuard UDP（默认模式）」"
+        menu_option 0 "返回"
+        ask "请选择 [0-6]: "
+        _warp_choice=$(printf '%s' "$REPLY" | tr -d ' \t\r')
+        case "$_warp_choice" in
+            1)
+                _mq_arch_sel=$(masque_choose_arch_menu) || { info "已取消"; pause; return 0; }
+                masque_install "$_mq_arch_sel"
+                pause
+                ;;
+            2) masque_status; pause ;;
+            3) masque_reregister; pause ;;
+            4)
+                if warp_is_paused; then masque_resume; else masque_pause; fi
+                pause
+                ;;
+            5)
+                if confirm "将先安全切回直连并彻底清理 usque 服务、配置与二进制。继续？"; then
+                    masque_uninstall
+                else
+                    info "已取消卸载"
+                fi
+                pause
+                ;;
+            6)
+                run_warp_install_flow
+                pause
+                ;;
+            0|q|Q) return 0 ;;
+            *) warn "无效输入: $_warp_choice"; pause ;;
+        esac
+        return 0
+    fi
+
+    menu_title "WARP 管理中心 · 当前模式：WireGuard UDP（默认）"
     warp_show_channel_summary
-    menu_option 1 "安装 / 启用三路 WARP"
+    menu_option 1 "安装 / 启用三路内核态 WARP"
     menu_option 2 "查看通道状态与出口 IP"
     menu_option 3 "立即执行一次保活修复"
     menu_option 4 "刷新指定通道出口 IP"
@@ -1588,8 +1656,9 @@ run_warp_setup() {
         menu_option 5 "暂停 WARP（临时切回直连，保留接口）"
     fi
     menu_option 6 "停用自动出站并移除管理接口"
+    menu_option 7 "切换为「WARP MASQUE (usque)」模式（UDP 被封推荐）"
     menu_option 0 "返回"
-    ask "请选择 [0-6]: "
+    ask "请选择 [0-7]: "
     _warp_choice=$(printf '%s' "$REPLY" | tr -d ' \t\r')
     case "$_warp_choice" in
         1) run_warp_install_flow; pause ;;
@@ -1605,29 +1674,69 @@ run_warp_setup() {
             fi
             pause
             ;;
+        7)
+            _mq_arch_sel=$(masque_choose_arch_menu) || { info "已取消"; pause; return 0; }
+            masque_install "$_mq_arch_sel"
+            pause
+            ;;
         0|q|Q) return 0 ;;
         *) warn "无效输入: $_warp_choice"; pause ;;
     esac
 }
 
 warp_command() {
+    command -v warp_load_mode_env >/dev/null 2>&1 && warp_load_mode_env
     _warp_command="${1:-menu}"
     case "$_warp_command" in
         menu) run_warp_setup ;;
         install) run_warp_install_flow ;;
-        status) warp_status ;;
+        status)
+            if [ "$WARP_MODE" = "masque" ] && command -v masque_status >/dev/null 2>&1; then
+                masque_status
+            else
+                warp_status
+            fi
+            ;;
         repair) warp_repair_once ;;
         refresh) shift; warp_refresh_ips "$@" ;;
-        pause) warp_pause ;;
-        resume) warp_resume ;;
+        pause)
+            if [ "$WARP_MODE" = "masque" ] && command -v masque_pause >/dev/null 2>&1; then
+                masque_pause
+            else
+                warp_pause
+            fi
+            ;;
+        resume)
+            if [ "$WARP_MODE" = "masque" ] && command -v masque_resume >/dev/null 2>&1; then
+                masque_resume
+            else
+                warp_resume
+            fi
+            ;;
         api) warp_enable_clash_api ;;
         disable)
-            confirm "将恢复 sing-box 原有出站并删除 sboxwg1/2/3。继续？" && warp_disable
+            if [ "$WARP_MODE" = "masque" ] && command -v masque_uninstall >/dev/null 2>&1; then
+                confirm "将恢复 sing-box 原有出站并卸载 MASQUE。继续？" && masque_uninstall
+            else
+                confirm "将恢复 sing-box 原有出站并删除 sboxwg1/2/3。继续？" && warp_disable
+            fi
+            ;;
+        masque)
+            _mq_sub="${2:-dual}"
+            case "$_mq_sub" in
+                dual|l4-socks|socks|socks-http2) masque_install "$_mq_sub" ;;
+                status) masque_status ;;
+                reregister) masque_reregister ;;
+                pause) masque_pause ;;
+                resume) masque_resume ;;
+                uninstall) masque_uninstall ;;
+                *) err "用法: sbox warp masque [dual|l4-socks|socks|socks-http2|status|reregister|pause|resume|uninstall]"; return 2 ;;
+            esac
             ;;
         daemon) warp_daemon ;;
         log) tail -n 100 "$WARP_LOG" 2>/dev/null || warn "暂无 WARP 保活日志" ;;
         *)
-            err "用法: sbox warp [menu|install|status|repair|refresh|pause|resume|api|disable|daemon|log]"
+            err "用法: sbox warp [menu|install|status|repair|refresh|pause|resume|api|disable|masque|daemon|log]"
             return 2
             ;;
     esac

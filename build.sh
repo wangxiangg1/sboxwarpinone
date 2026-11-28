@@ -26,6 +26,7 @@ for _part in \
     "${SRC_DIR}/40_nodes.sh" \
     "${SRC_DIR}/50_tls_warp_cf.sh" \
     "${SRC_DIR}/55_warp_kernel.sh" \
+    "${SRC_DIR}/56_warp_masque.sh" \
     "${SRC_DIR}/90_main.sh"
 do
     [ -f "$_part" ] || { echo "❌ 缺少源码模块: $_part" >&2; rm -f "$TMP_FILE"; exit 1; }
